@@ -117,7 +117,7 @@ def var_dummyobsprior(y: np.ndarray,
             exog_std = float(mn.get("exog_std", 1e8))
             decay = float(mn.get("decay", 1))
 
-            # оценка стандартных отклонений остатков AR(1)
+            # оценка стандартных отклонений остатков AR(4)
             if "sigma" not in mn:
                 sigma_data = np.asarray(mn.get("sigma_data", y))
                 sigma = np.zeros(N)
@@ -147,7 +147,7 @@ def var_dummyobsprior(y: np.ndarray,
             B0 = np.zeros((K, N))
             mvector = np.asarray(mn.get("mvector", np.ones(N)))
             mvector = mvector[:N]
-            # set means of first lag own coefficients
+            # задание значений коэффициентов при первых собственных лагах
             for i in range(N):
                 B0[i, i] = mvector[i]
 
@@ -166,7 +166,7 @@ def var_dummyobsprior(y: np.ndarray,
                 print(f"Note: for a proper prior need sigma_deg > {N - 1}")
                 print(f"Note: for E(Sigma) to exist need sigma_deg > {N + 1}")
 
-    # Actual data matrices
+    # Полные матрицы данных
     Y, X = _varlags(y, P)
     if k_exog > 0:
         X = np.hstack([X, w[P:, :]])
@@ -174,7 +174,7 @@ def var_dummyobsprior(y: np.ndarray,
     print(f'приоры: {Xprior}, {Yprior}')
     #Xprior = np.array([])
     #Yprior = np.array([])
-    # Stack with priors
+    # Объединение
     Yst = np.vstack([Yprior, Y]) if Yprior.size else Y
     Xst = np.vstack([Xprior, X]) if Xprior.size else X
     print(Xst, Yst)
@@ -215,7 +215,7 @@ def var_dummyobsprior(y: np.ndarray,
     
     # генерация МСМС-выборок
     if n_draws and n_draws > 0:
-        df = int(round(T + vprior))
+        nf = int(round(T + vprior))
         XtX = Xst.T @ Xst
         cF, lower = cho_factor(XtX)
         chol_inv = solve_triangular(cF, np.eye(cF.shape[0]), lower=lower)
@@ -231,7 +231,7 @@ def var_dummyobsprior(y: np.ndarray,
         rng = np.random.default_rng(42)  # Fixed seed for reproducibility
         
         for d in range(n_draws):
-            Z = rng.standard_normal(size=(df, N))
+            Z = rng.standard_normal(size=(nf, N))
             IW = np.linalg.inv(Z.T @ Z)
             Sigma_draw = Sst_chol @ IW @ Sst_chol.T
             E = rng.standard_normal(size=(K, N))
@@ -270,7 +270,7 @@ def compute_impulse_responses(var_result: VARResult, n_periods: int = 20, shock_
             A = beta_draw[:P*N, :].T
             A = A.reshape(N, P, N)
             
-            # Cholesky разложение для данной выборки
+            # разложение Холецкого для данной выборки
             try:
                 chol_sigma = np.linalg.cholesky(sigma_draw)
             except:
@@ -304,7 +304,7 @@ def compute_impulse_responses(var_result: VARResult, n_periods: int = 20, shock_
                     irf_draws[:, :, h, draw] = Phi @ G * shock_size
                     Phi = Phi @ F
         
-        # Вычисление медианы и квантилей
+        # Вычисление медианы и процентилей
         irf_median = np.median(irf_draws, axis=3)
         irf_lower = np.percentile(irf_draws, 5, axis=3)  # 5-й процентиль
         irf_upper = np.percentile(irf_draws, 95, axis=3)  # 95-й процентиль
@@ -372,10 +372,10 @@ var_norm_names = {'GDP_(%)_m/m_real_2021': 'GDP',
              'gov_expan': 'Expances',
              'unempl': 'Unemployment'}
 
-def plot_gdp_impulse_responses(irf_results, var_names, gdp_idx=0, n_periods=20):
+def plot_gdp_impulse_responses(irf_results, var_names, var_idx=0, n_periods=20):
     """Построение графиков импульсных откликов ВВП с доверительными интервалами"""
     n_vars = len(var_names)
-    n_shocks = n_vars - 1  # Исключаем сам ВВП
+    n_shocks = n_vars - 1  # Исключаем собственный шок переменной
     
     # Настройка графика
     fig, axes = plt.subplots(4, 4, figsize=(20, 15))
@@ -386,16 +386,16 @@ def plot_gdp_impulse_responses(irf_results, var_names, gdp_idx=0, n_periods=20):
     
     shock_idx = 0
     for i in range(n_vars):
-        if i == gdp_idx:  # Пропускаем ВВП как шок к самому себе
+        if i == var_idx:  # Пропускаем шок к самому себе
             continue
             
         ax = axes[shock_idx]
         
-        # Импульсный отклик ВВП на шок переменной i
-        response_median = irf_results['median'][gdp_idx, i, :n_periods]
-        #print(f'{var_names[i]}, {np.sum(abs(irf_results['median'][gdp_idx, i, :n_periods]))}')
+        # Импульсный отклик на шок переменной i
+        response_median = irf_results['median'][var_idx, i, :n_periods]
+        #print(f'{var_names[i]}, {np.sum(abs(irf_results['median'][var_idx, i, :n_periods]))}')
         irf_final = 1
-        for irfss in irf_results['median'][gdp_idx, i, :n_periods]:
+        for irfss in irf_results['median'][var_idx, i, :n_periods]:
             irf_final = irf_final * (1 + irfss)
         print(f'{var_names[i]}, {irf_final - 1}')
         periods = np.arange(n_periods)
@@ -406,8 +406,8 @@ def plot_gdp_impulse_responses(irf_results, var_names, gdp_idx=0, n_periods=20):
         
         # Доверительные интервалы (если есть)
         if has_ci:
-            response_lower = irf_results['lower'][gdp_idx, i, :n_periods]
-            response_upper = irf_results['upper'][gdp_idx, i, :n_periods]
+            response_lower = irf_results['lower'][var_idx, i, :n_periods]
+            response_upper = irf_results['upper'][var_idx, i, :n_periods]
             
             ax.fill_between(periods, response_lower, response_upper, 
                           alpha=0.3, color='lightblue', 
@@ -421,7 +421,7 @@ def plot_gdp_impulse_responses(irf_results, var_names, gdp_idx=0, n_periods=20):
         ax.axhline(y=0, color='k', linestyle='-', alpha=0.4, linewidth=0.8)
         
         # Настройка графика
-        ax.set_title(f'{var_norm_names.get(var_names[gdp_idx])} response to {var_norm_names.get(var_names[i])} shock', fontsize=11, fontweight='bold')
+        ax.set_title(f'{var_norm_names.get(var_names[var_idx])} response to {var_norm_names.get(var_names[i])} shock', fontsize=11, fontweight='bold')
         ax.set_xlabel('Periods', fontsize=10)
         ax.set_ylabel('Response', fontsize=10)
         ax.grid(True, alpha=0.3)
@@ -448,7 +448,7 @@ def plot_gdp_impulse_responses(irf_results, var_names, gdp_idx=0, n_periods=20):
     for i in range(shock_idx, len(axes)):
         fig.delaxes(axes[i])
     
-    plt.suptitle(f'Impulse Response Functions: {var_norm_names.get(var_names[gdp_idx])} Response to Structural Shocks\n(with 90% Confidence Intervals)', 
+    plt.suptitle(f'Impulse Response Functions: {var_norm_names.get(var_names[var_idx])} Response to Structural Shocks\n(with 90% Confidence Intervals)', 
                 fontsize=14, fontweight='bold', y=0.98)
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.show()
@@ -553,7 +553,7 @@ print(f"Переменные: {var_names}")
 
 # Настройка модели BVAR
 info = {
-    'lags': 6,  # Количество лагов
+    'lags': 5,  # Количество лагов
     'minnesota': {
         'tightness': 0.2,      # Степень сжатия Minnesota prior
         'sigma_deg': len(var_names) + 15,  # Степени свободы для приора на сигма
@@ -576,7 +576,7 @@ print(f"Размерность sigma: {var_result.sigma.shape}")
 
 # Вычисление импульсных откликов
 print("\nВычисление импульсных откликов...")
-irf_results = compute_impulse_responses(var_result, n_periods=6, shock_size=2.0)
+irf_results = compute_impulse_responses(var_result, n_periods=5, shock_size=2.0)
 
 if 'draws' in irf_results and irf_results['draws'] is not None:
     print(f"Размерность IRF draws: {irf_results['draws'].shape}")
@@ -586,9 +586,9 @@ else:
 
 # Построение графиков импульсных откликов ВВП
 print("\nПостроение графиков импульсных откликов ВВП с доверительными интервалами...")
-plot_gdp_impulse_responses(irf_results, var_names, gdp_idx=0, n_periods=6)
-plot_gdp_impulse_responses(irf_results, var_names, gdp_idx=2, n_periods=6)
-plot_gdp_impulse_responses(irf_results, var_names, gdp_idx=4, n_periods=6)
+plot_gdp_impulse_responses(irf_results, var_names, var_idx=0, n_periods=5)
+plot_gdp_impulse_responses(irf_results, var_names, var_idx=2, n_periods=5)
+plot_gdp_impulse_responses(irf_results, var_names, var_idx=4, n_periods=5)
 
 
 # Вывод некоторых числовых результатов
@@ -599,7 +599,7 @@ for i, var_name in enumerate(var_names):
     if i == 0:  # Пропускаем сам ВВП
         continue
     print(f"\nШок {var_name}:")
-    for t in range(6):
+    for t in range(5):
         median_val = irf_results['median'][0, i, t]
         if has_ci:
             lower_val = irf_results['lower'][0, i, t]
