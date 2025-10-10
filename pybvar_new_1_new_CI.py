@@ -309,7 +309,7 @@ def compute_impulse_responses(var_result: VARResult, n_periods: int = 20, shock_
         
         # Вычисление выборочных средних и стандартных отклонений
         irf_mean = np.mean(irf_draws, axis=3)
-        irf_std = np.std(irf_draws, axis=3, ddof=1)  # Несмещенная оценка стд. откл.
+        irf_std = np.std(irf_draws, axis=3, ddof=1)  # Несмещенная оценка стд. отклон.
         
         # Построение классических доверительных интервалов на основе нормального распределения
         alpha = 1 - confidence_level
@@ -321,7 +321,7 @@ def compute_impulse_responses(var_result: VARResult, n_periods: int = 20, shock_
         # Доверительные интервалы: mean ± z_critical * SE
         irf_lower = irf_mean - z_critical * se_mean
         irf_upper = irf_mean + z_critical * se_mean
-        
+              
         print(f"Используется {confidence_level*100:.1f}% доверительный интервал")
         print(f"Критическое значение (z): {z_critical:.3f}")
         print(f"Выборочное среднее и стандартное отклонение используются для построения классических ДИ")
@@ -391,7 +391,10 @@ var_norm_names = {'GDP_(%)_m/m_real_2021': 'GDP',
              'spread_diff': 'Spread',
              'bud_balance': 'Deficit',
              'gov_expan': 'Expances',
-             'unempl': 'Unemployment'}
+             'unempl': 'Unemployment',
+             'net_exp': 'Net export',
+             'GPR': 'Geopolitics',
+             'nom_eff_exch_rate_index_m/m': 'Nom Exch Rate'}
 
 
 
@@ -418,7 +421,7 @@ def plot_gdp_impulse_responses(irf_results, var_names, var_idx=0, n_periods=20):
         if 'mean' in irf_results:
             response_mean = irf_results['mean'][var_idx, i, :n_periods]
         else:
-            response_mean = irf_results['median'][var_idx, i, :n_periods]  # Совместимость со старым кодом
+            response_mean = irf_results['median'][var_idx, i, :n_periods]  
         
         # Вычисление кумулятивного эффекта
         irf_final = 1
@@ -428,11 +431,11 @@ def plot_gdp_impulse_responses(irf_results, var_names, var_idx=0, n_periods=20):
         
         periods = np.arange(n_periods)
         
-        # Основная линия (среднее значение)
+        # Основная линия отклика
         label_main = f'IRF (Mean)' if method == 'classical_normal' else 'IRF'
         ax.plot(periods, response_mean, 'b-', linewidth=2.5, label=label_main)
         
-        # Доверительные интервалы (если есть)
+        # Доверительные интервалы 
         if has_ci:
             response_lower = irf_results['lower'][var_idx, i, :n_periods]
             response_upper = irf_results['upper'][var_idx, i, :n_periods]
@@ -491,6 +494,12 @@ def plot_gdp_impulse_responses(irf_results, var_names, var_idx=0, n_periods=20):
 
 data = pd.read_excel('/Users/scherbakovandrew/Documents/Model_gretl.xlsx')
 df = pd.DataFrame(data)
+df = pd.DataFrame({'Date': df['Date'], 'GPR': df['GPR'], 'Brent': df['Brent'], 'GDP_(%)_m/m_real_2021': df['GDP_(%)_m/m_real_2021'], 'net_exp': df['net_exp'], 'Inflation_m/m_without_seas': df['Inflation_m/m_without_seas'], 
+                   'bud_balance': df['bud_balance'], 'gov_expan': df['gov_expan'], 
+                   'Interest_rate_(%)': df['Interest_rate_(%)'], 'Fed_Bonds_10': df['Fed_Bonds_10'], 'nom_eff_exch_rate_index_m/m': df['nom_eff_exch_rate_index_m/m'],
+                   'real_eff_exchange_rate_index_m/m': df['real_eff_exchange_rate_index_m/m'],
+                   'unempl': df['unempl'], 'consumption_real_2021': df['consumption_real_2021'], 'spread_diff': df['spread_diff'], 'IMOEX': df['IMOEX'],
+                   'M2': df['M2'], 'exp_inf_firms_seas': df['exp_inf_firms_seas']})
 for col in ['GDP_(%)_m/m_real_2021']:
     #df[col] = df[col] - seasonal_decompose(df[col], model='additive', period=12).seasonal
     for i in range(0, len(df[col])):
@@ -527,7 +536,7 @@ for col in ['Brent', 'M2']:
         df[col][i] = a[i]/a[i-1] - 1
         #df[col][i] = np.log(df[col][i])
         
-for col in ['Fed_Bonds_10']:
+for col in ['Fed_Bonds_10', 'net_exp']:
     #df[col] = df[col] - seasonal_decompose(df[col], model='multiplicative', period=12).seasonal
     a = list(df[col])
     for i in range(1, len(df[col])):
@@ -564,7 +573,8 @@ def adf_test(series, title=''):
         print('\t%s: %.3f' % (key, value))
     print()
 
-for col in ['GDP_(%)_m/m_real_2021', 'Interest_rate_(%)', 'Inflation_m/m_without_seas', 'Fed_Bonds_10', 'real_eff_exchange_rate_index_m/m', 'Brent', 'IMOEX', 'consumption_real_2021', 'M2', 'exp_inf_firms_seas', 'spread_diff', 'bud_balance', 'gov_expan', 'unempl']:
+for col in ['GDP_(%)_m/m_real_2021', 'Interest_rate_(%)', 'Inflation_m/m_without_seas', 'Fed_Bonds_10', 'real_eff_exchange_rate_index_m/m', 'Brent', 'IMOEX',
+            'consumption_real_2021', 'M2', 'exp_inf_firms_seas', 'spread_diff', 'bud_balance', 'gov_expan', 'unempl', 'net_exp', 'nom_eff_exch_rate_index_m/m', 'GPR']:
     adf_test(df[col], title=col)
 
 df['Date'] = pd.to_datetime(df['Date'])
@@ -589,11 +599,11 @@ print(f"Переменные: {var_names}")
 info = {
     'lags': 6,  # Количество лагов
     'minnesota': {
-        'tightness': 0.2,      # Степень сжатия Minnesota prior
-        'sigma_deg': len(var_names) + 15,  # Степени свободы для приора на сигма
-        'decay': 1, # Скорость убывания весов лагов
-        'sigma_arlags': 4,
-        'mvector': np.array([0.119293, 0.212753, 0.295495, 0.159226, 0.190131, 0.374797, -0.0845330, 0.283773, -0.0439779, 0.136006, 0.0865224, -0.00589738, -0.391709, 0.670747]),
+        'tightness': 0.3,      # Степень сжатия Minnesota prior
+        'sigma_deg': len(var_names) + 5,  # Степени свободы для приора на сигма
+        'decay': 0.5, # Скорость убывания весов лагов
+        'sigma_arlags': 1,
+        'mvector': np.array([0.688704, 0.316132, 0.117119,0.985884, 0.297908, -0.00592306, -0.288041, 0.211113, 0.148931, 0.305189, 0.197227, 0.593753, 0.975756, 0.0620511, -0.0911293, -0.0186551, 0.159483]),
         #'sigma_factor': 0.1
     }
 }
@@ -609,8 +619,8 @@ print(f"Размерность beta: {var_result.beta.shape}")
 print(f"Размерность sigma: {var_result.sigma.shape}")
 
 # Вычисление импульсных откликов
-print("\nВычисление импульсных откликов...")
-irf_results = compute_impulse_responses(var_result, n_periods=6, shock_size=2.0)
+print("\nВычисление импульсных откликов...")    
+irf_results = compute_impulse_responses(var_result, n_periods=6, shock_size=1.0)
 
 
 if 'draws' in irf_results and irf_results['draws'] is not None:
@@ -621,9 +631,9 @@ else:
 
 # Построение графиков импульсных откликов ВВП
 print("\nПостроение графиков импульсных откликов ВВП с доверительными интервалами...")
-plot_gdp_impulse_responses(irf_results, var_names, var_idx=0, n_periods=6)
 plot_gdp_impulse_responses(irf_results, var_names, var_idx=2, n_periods=6)
 plot_gdp_impulse_responses(irf_results, var_names, var_idx=4, n_periods=6)
+#plot_gdp_impulse_responses(irf_results, var_names, var_idx=9, n_periods=6)
 
 
 # Вывод некоторых числовых результатов
