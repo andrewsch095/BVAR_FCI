@@ -254,8 +254,55 @@ def var_dummyobsprior(y: np.ndarray,
         sigma_draws=sigma_draws,
     )
 
+
+def print_shock_sizes(var_result, var_names, y_data, shock_size=1.0, var_norm_names=None):
+   
+    if var_norm_names is None:
+        var_norm_names = {name: name for name in var_names}
+    
+    sigma = var_result.sigma
+    try:
+        chol_sigma = np.linalg.cholesky(sigma)
+    except np.linalg.LinAlgError:
+        chol_sigma = np.linalg.cholesky(sigma + 1e-10 * np.eye(sigma.shape[0]))
+    
+    # Стандартные отклонения остатков
+    resid_std = np.sqrt(np.diag(sigma))
+    
+    # Диагональ структурного шока
+    structural_shock_std = np.diag(chol_sigma)
+    
+    # Фактический размер шока
+    applied_shock = shock_size * structural_shock_std
+    
+    # Среднее по абсолютным значениям
+    mean_abs = np.nanmean(np.abs(y_data), axis=0)
+    
+    # Относительный размер шока (относительно среднего)
+    relative_shock = np.divide(
+        applied_shock, 
+        mean_abs, 
+        out=np.full_like(applied_shock, np.nan), 
+        where=mean_abs != 0
+    )
+    
+    display_names = [var_norm_names.get(name, name) for name in var_names]
+    
+    shock_table = pd.DataFrame({
+        'Variable': display_names,
+        'Mean(|x|) (Data)': mean_abs,
+        'Residual Std (Reduced Form)': resid_std,
+        'Structural Shock Std (Cholesky)': structural_shock_std,
+        f'Applied Shock Size (×{shock_size})': applied_shock,
+        'Shock / Mean(|x|)': relative_shock
+    })
+    
+   
+    print(shock_table.round(6).to_string(index=False))
+
+    
+    return shock_table
 def compute_impulse_responses(var_result: VARResult, n_periods: int = 20, shock_size: float = 1.0, confidence_level: float = 0.90):
-    """Вычисление импульсных откликов с классическими доверительными интервалами на основе выборочной дисперсии"""
     P = var_result.lags
     N = var_result.sigma.shape[0]
     n_draws = var_result.beta_draws.shape[2] if var_result.beta_draws is not None else 0
@@ -279,7 +326,7 @@ def compute_impulse_responses(var_result: VARResult, n_periods: int = 20, shock_
             except:
                 chol_sigma = np.linalg.cholesky(sigma_draw + 1e-10 * np.eye(N))
             
-            # VAR(1) представление
+            # VAR(1) 
             if P > 1:
                 F = np.zeros((N*P, N*P))
                 F[:N, :] = A.reshape(N, P*N)
@@ -309,22 +356,19 @@ def compute_impulse_responses(var_result: VARResult, n_periods: int = 20, shock_
         
         # Вычисление выборочных средних и стандартных отклонений
         irf_mean = np.mean(irf_draws, axis=3)
-        irf_std = np.std(irf_draws, axis=3, ddof=1)  # Несмещенная оценка стд. отклон.
+        irf_std = np.std(irf_draws, axis=3, ddof=1) 
         
-        # Построение классических доверительных интервалов на основе нормального распределения
+        # Построение классических доверительных интервалов 
         alpha = 1 - confidence_level
-        z_critical = norm.ppf(1 - alpha/2)  # Критическое значение для двустороннего интервала
-        
-        # Стандартная ошибка среднего
+        z_critical = norm.ppf(1 - alpha/2)  
         se_mean = irf_std / np.sqrt(n_draws)
         
-        # Доверительные интервалы: mean ± z_critical * SE
+        # Доверительные интервалы
         irf_lower = irf_mean - z_critical * se_mean
         irf_upper = irf_mean + z_critical * se_mean
               
         print(f"Используется {confidence_level*100:.1f}% доверительный интервал")
         print(f"Критическое значение (z): {z_critical:.3f}")
-        print(f"Выборочное среднее и стандартное отклонение используются для построения классических ДИ")
         
         return {
             'mean': irf_mean,
@@ -386,7 +430,7 @@ var_norm_names = {'GDP_(%)_m/m_real_2021': 'GDP',
              'Brent': 'Oil',
              'IMOEX': 'IMOEX',
              'consumption_real_2021': 'Consump',
-             'M2': 'M2',
+             'M2X': 'M2X',
              'exp_inf_firms_seas': 'Exp inf firm',
              'spread_diff': 'Spread',
              'bud_balance': 'Deficit',
@@ -399,7 +443,6 @@ var_norm_names = {'GDP_(%)_m/m_real_2021': 'GDP',
 
 
 def plot_gdp_impulse_responses(irf_results, var_names, var_idx=0, n_periods=20):
-    """Построение графиков импульсных откликов ВВП с доверительными интервалами"""
     n_vars = len(var_names)
     n_shocks = n_vars - 1  # Исключаем собственный шок переменной
     fig, axes = plt.subplots(4, 4, figsize=(20, 15))
@@ -453,7 +496,6 @@ def plot_gdp_impulse_responses(irf_results, var_names, var_idx=0, n_periods=20):
                 se_mean = irf_results['se_mean'][var_idx, i, :n_periods]
                 print(f"Стандартная ошибка для {var_names[i]} в период 1: {se_mean[0]:.6f}")
         
-        # Нулевая линия
         ax.axhline(y=0, color='k', linestyle='-', alpha=0.4, linewidth=0.8)
         
         # Настройка графика
@@ -490,22 +532,169 @@ def plot_gdp_impulse_responses(irf_results, var_names, var_idx=0, n_periods=20):
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.show()
 
+
+def compute_cumulative_irf(irf_results):
+    cum_irf = {}
+    
+    for key in irf_results:
+        if key not in ['mean', 'median', 'lower', 'upper', 'std', 'se_mean', 'draws']:
+            cum_irf[key] = irf_results[key]
+    
+    # средний отклик
+    if 'mean' in irf_results:
+        mean_irf = irf_results['mean']
+        N, _, n_periods = mean_irf.shape
+        cum_mean = np.zeros_like(mean_irf)
+        
+        for i in range(N):
+            for j in range(N):
+                cumulative_product = 1.0
+                for h in range(n_periods):
+                    cumulative_product *= (1.0 + mean_irf[i, j, h])
+                    cum_mean[i, j, h] = cumulative_product - 1.0
+        cum_irf['mean'] = cum_mean
+
+    # Если есть MCMC-выборки, пересчитываем всё на их основе
+    if 'draws' in irf_results and irf_results['draws'] is not None:
+        draws = irf_results['draws']  # (N, N, n_periods, n_draws)
+        N, _, n_periods, n_draws = draws.shape
+        cum_draws = np.zeros_like(draws)
+        
+        # Рассчитываем накопленный эффект для каждой MCMC-выборки
+        for d in range(n_draws):
+            for i in range(N):
+                for j in range(N):
+                    cumulative_product = 1.0
+                    for h in range(n_periods):
+                        cumulative_product *= (1.0 + draws[i, j, h, d])
+                        cum_draws[i, j, h, d] = cumulative_product - 1.0
+        
+        cum_irf['draws'] = cum_draws
+        cum_irf['mean'] = cum_mean    #np.mean(cum_draws, axis=3)
+        cum_irf['std'] = np.std(cum_draws, axis=3, ddof=1)
+        cum_irf['se_mean'] = cum_irf['std'] / np.sqrt(n_draws)
+        
+        # Пересчитываем доверительные интервалы
+        if 'confidence_level' in irf_results:
+            alpha = 1 - irf_results['confidence_level']
+            z_critical = norm.ppf(1 - alpha/2)
+            cum_irf['lower'] = cum_irf['mean'] - z_critical * cum_irf['se_mean']
+            cum_irf['upper'] = cum_irf['mean'] + z_critical * cum_irf['se_mean']
+    
+    return cum_irf
+
+
+def plot_cumulative_impulse_responses(irf_results, var_names, var_idx=0, n_periods=20):
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from scipy.stats import norm
+
+    n_vars = len(var_names)
+    fig, axes = plt.subplots(4, 4, figsize=(20, 15))
+    axes = axes.flatten()
+    
+    has_ci = irf_results['lower'] is not None and irf_results['upper'] is not None
+    method = irf_results.get('method', 'unknown')
+    confidence_level = irf_results.get('confidence_level', 0.90)
+    
+    shock_idx = 0
+    for i in range(n_vars):
+        if i == var_idx:
+            continue
+            
+        ax = axes[shock_idx]
+        response_mean = irf_results['mean'][var_idx, i, :n_periods]
+        periods = np.arange(n_periods)
+        
+        label_main = 'Cumulative IRF (Mean)' if method == 'classical_normal' else 'Cumulative IRF'
+        ax.plot(periods, response_mean, 'b-', linewidth=2.5, label=label_main)
+        
+        # Доверительные интервалы
+        if has_ci:
+            response_lower = irf_results['lower'][var_idx, i, :n_periods]
+            response_upper = irf_results['upper'][var_idx, i, :n_periods]
+            ci_label = f'{confidence_level*100:.0f}% CI (Normal)' if method == 'classical_normal' else f'{confidence_level*100:.0f}% CI'
+            ax.fill_between(periods, response_lower, response_upper, alpha=0.3, color='lightblue', label=ci_label)
+            ax.plot(periods, response_lower, '--', color='navy', alpha=0.7, linewidth=1)
+            ax.plot(periods, response_upper, '--', color='navy', alpha=0.7, linewidth=1)
+        
+        ax.axhline(y=0, color='k', linestyle='-', alpha=0.4, linewidth=0.8)
+        ax.set_title(f'Cumulative {var_norm_names.get(var_names[var_idx])} response to {var_norm_names.get(var_names[i])} shock', 
+                     fontsize=11, fontweight='bold')
+        ax.set_xlabel('Periods', fontsize=10)
+        ax.set_ylabel('Cumulative Response', fontsize=10)
+        ax.grid(True, alpha=0.3)
+        
+        if shock_idx == 0:
+            ax.legend(fontsize=9, loc='upper right')
+        ax.tick_params(axis='both', which='major', labelsize=9)
+        
+        # Настройка осей
+        y_max = np.max(np.abs(response_mean))
+        if has_ci:
+            ci_max = max(np.max(np.abs(response_lower)), np.max(np.abs(response_upper)))
+            y_max = max(y_max, ci_max)
+        if y_max > 0:
+            ax.set_ylim(-y_max * 1.1, y_max * 1.1)
+        
+        shock_idx += 1
+    
+    for i in range(shock_idx, len(axes)):
+        fig.delaxes(axes[i])
+    
+    ci_method_text = "Classical Normal Distribution" if method == 'classical_normal' else "Percentile-based"
+    plt.suptitle(f'Cumulative Impulse Response Functions: {var_norm_names.get(var_names[var_idx])} Response\n(with {confidence_level*100:.0f}% CIs using {ci_method_text})', 
+                 fontsize=14, fontweight='bold', y=0.98)
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.show()
+
+def print_cumulative_irf_table(cumulative_irf, var_names, target_indices=[2, 6], n_periods=None):
+    import pandas as pd
+    import numpy as np
+    
+    # Определяем последний период
+    if n_periods is None:
+        n_periods = cumulative_irf['mean'].shape[2]
+    last_period_idx = n_periods - 1
+
+    shock_names = [var_norm_names.get(name, name) for name in var_names]
+    table_data = {}
+    
+    for target_idx in target_indices:
+        target_name = var_norm_names.get(var_names[target_idx], var_names[target_idx])
+        responses = cumulative_irf['mean'][target_idx, :, last_period_idx]
+        table_data[target_name] = responses 
+    
+    df_table = pd.DataFrame(table_data, index=shock_names)
+    
+    # Форматируем и выводим таблицу
+    print(f"\nКумулятивные импульсные отклики за период {last_period_idx + 1} (в %):")
+    print("=" * 70)
+    print(df_table.round(4).to_string())
+    print("=" * 70)
 #Загрузка данных
 
 data = pd.read_excel('/Users/scherbakovandrew/Documents/Model_gretl.xlsx')
 df = pd.DataFrame(data)
-df = pd.DataFrame({'Date': df['Date'], 'GPR': df['GPR'], 'Brent': df['Brent'], 'GDP_(%)_m/m_real_2021': df['GDP_(%)_m/m_real_2021'], 'net_exp': df['net_exp'], 'Inflation_m/m_without_seas': df['Inflation_m/m_without_seas'], 
-                   'bud_balance': df['bud_balance'], 'gov_expan': df['gov_expan'], 
+df = pd.DataFrame({'Date': df['Date'], 'GPR': df['GPR'], 'Brent': df['Brent'], 'GDP_(%)_m/m_real_2021': df['GDP_(%)_m/m_real_2021'], 
+                   'consumption_real_2021': df['consumption_real_2021'], 'unempl': df['unempl'],
+                   'net_exp': df['net_exp'], 'Inflation_m/m_without_seas': df['Inflation_m/m_without_seas'], 
+                   'bud_balance': df['bud_balance'], 'gov_expan': df['gov_expan'], 'M2X': df['M2X'],
                    'Interest_rate_(%)': df['Interest_rate_(%)'], 'Fed_Bonds_10': df['Fed_Bonds_10'], 'nom_eff_exch_rate_index_m/m': df['nom_eff_exch_rate_index_m/m'],
                    'real_eff_exchange_rate_index_m/m': df['real_eff_exchange_rate_index_m/m'],
-                   'unempl': df['unempl'], 'consumption_real_2021': df['consumption_real_2021'], 'spread_diff': df['spread_diff'], 'IMOEX': df['IMOEX'],
-                   'M2': df['M2'], 'exp_inf_firms_seas': df['exp_inf_firms_seas']})
+                   'spread_diff': df['spread_diff'], 'IMOEX': df['IMOEX'],
+                   'exp_inf_firms_seas': df['exp_inf_firms_seas']})
 for col in ['GDP_(%)_m/m_real_2021']:
     #df[col] = df[col] - seasonal_decompose(df[col], model='additive', period=12).seasonal
     for i in range(0, len(df[col])):
-        df[col][i] = df[col][i]/100 - 1    
+        df[col][i] = df[col][i]/100 - 1   
+    
+for col in ['nom_eff_exch_rate_index_m/m']:
+    #df[col] = df[col] - seasonal_decompose(df[col], model='additive', period=12).seasonal
+    for i in range(0, len(df[col])):
+        df[col][i] = df[col][i]/100  
    
-for col in ['IMOEX']:
+for col in ['IMOEX', 'GPR']:
     #df[col] = df[col] - seasonal_decompose(df[col], model='multiplicative', period=12).seasonal
     a = list(df[col])
     for i in range(1, len(df[col])):
@@ -529,7 +718,7 @@ for col in ['consumption_real_2021']:
         df[col][i] = np.log(a[i]) - np.log(a[i-1]) 
     
 
-for col in ['Brent', 'M2']:
+for col in ['Brent', 'M2X']:
     #df[col] = df[col] - seasonal_decompose(df[col], model='multiplicative', period=12).seasonal
     a = list(df[col])
     for i in range(1, len(df[col])):
@@ -574,7 +763,7 @@ def adf_test(series, title=''):
     print()
 
 for col in ['GDP_(%)_m/m_real_2021', 'Interest_rate_(%)', 'Inflation_m/m_without_seas', 'Fed_Bonds_10', 'real_eff_exchange_rate_index_m/m', 'Brent', 'IMOEX',
-            'consumption_real_2021', 'M2', 'exp_inf_firms_seas', 'spread_diff', 'bud_balance', 'gov_expan', 'unempl', 'net_exp', 'nom_eff_exch_rate_index_m/m', 'GPR']:
+            'consumption_real_2021', 'M2X', 'exp_inf_firms_seas', 'spread_diff', 'bud_balance', 'gov_expan', 'unempl', 'net_exp', 'nom_eff_exch_rate_index_m/m', 'GPR']:
     adf_test(df[col], title=col)
 
 df['Date'] = pd.to_datetime(df['Date'])
@@ -597,13 +786,13 @@ print(f"Переменные: {var_names}")
 
 # Настройка модели BVAR
 info = {
-    'lags': 6,  # Количество лагов
+    'lags': 8,  # Количество лагов
     'minnesota': {
-        'tightness': 0.3,      # Степень сжатия Minnesota prior
+        'tightness': 0.7,      # Степень сжатия Minnesota prior
         'sigma_deg': len(var_names) + 5,  # Степени свободы для приора на сигма
-        'decay': 0.5, # Скорость убывания весов лагов
-        'sigma_arlags': 1,
-        'mvector': np.array([0.688704, 0.316132, 0.117119,0.985884, 0.297908, -0.00592306, -0.288041, 0.211113, 0.148931, 0.305189, 0.197227, 0.593753, 0.975756, 0.0620511, -0.0911293, -0.0186551, 0.159483]),
+        'decay': 0.7, # Скорость убывания весов лагов
+        'sigma_arlags': 1,  # GPR         Brent     GDP   consumption   unemp     exp    inflation    budget     expances     M2X     int rate    bonds   nom_exch  real_exch   spread      IMOEX     exp_inf         
+        #'mvector': np.array([-0.228694, 0.316132, 0.117119, 0.975756, 0.593753, 0.991262, 0.297908, -0.00592306, -0.288041, 0.0164542, 0.211113, 0.148931, 0.305189, 0.197227, 0.0620511, -0.0911293, 0.159483]),
         #'sigma_factor': 0.1
     }
 }
@@ -618,10 +807,21 @@ print(f"Количество лагов: {var_result.lags}")
 print(f"Размерность beta: {var_result.beta.shape}")
 print(f"Размерность sigma: {var_result.sigma.shape}")
 
+print("\nВычисление импульсных откликов...")    
+
+# Размер шоков
+shock_table = print_shock_sizes(
+    var_result, 
+    var_names, 
+    y_data=y_full,             
+    shock_size=1.0, 
+    var_norm_names=var_norm_names
+)
+
 # Вычисление импульсных откликов
 print("\nВычисление импульсных откликов...")    
-irf_results = compute_impulse_responses(var_result, n_periods=6, shock_size=1.0)
-
+irf_results = compute_impulse_responses(var_result, n_periods=8, shock_size= 1.0)
+cumulative_irf = compute_cumulative_irf(irf_results)
 
 if 'draws' in irf_results and irf_results['draws'] is not None:
     print(f"Размерность IRF draws: {irf_results['draws'].shape}")
@@ -631,24 +831,14 @@ else:
 
 # Построение графиков импульсных откликов ВВП
 print("\nПостроение графиков импульсных откликов ВВП с доверительными интервалами...")
-plot_gdp_impulse_responses(irf_results, var_names, var_idx=2, n_periods=6)
-plot_gdp_impulse_responses(irf_results, var_names, var_idx=4, n_periods=6)
+plot_gdp_impulse_responses(irf_results, var_names, var_idx=2, n_periods=8)
+plot_gdp_impulse_responses(irf_results, var_names, var_idx=6, n_periods=8)
+plot_cumulative_impulse_responses(cumulative_irf, var_names, var_idx=2, n_periods=8)
+plot_cumulative_impulse_responses(cumulative_irf, var_names, var_idx=6, n_periods=8)
 #plot_gdp_impulse_responses(irf_results, var_names, var_idx=9, n_periods=6)
 
 
 # Вывод некоторых числовых результатов
-print("\nИмпульсные отклики ВВП на единичные шоки (первые 5 периодов):")
-has_ci = irf_results['lower'] is not None and irf_results['upper'] is not None
 
-#for i, var_name in enumerate(var_names):
-    #if i == 0:  # Пропускаем сам ВВП
-        #continue
-    #print(f"\nШок {var_name}:")
-    #for t in range(5):
-        #median_val = irf_results['median'][0, i, t]
-        #if has_ci:
-            #lower_val = irf_results['lower'][0, i, t]
-            #upper_val = irf_results['upper'][0, i, t]
-            #print(f"  Период {t+1}: {median_val:.6f} [{lower_val:.6f}, {upper_val:.6f}]")
-        #else:
-            #print(f"  Период {t+1}: {median_val:.6f}")
+has_ci = irf_results['lower'] is not None and irf_results['upper'] is not None
+print_cumulative_irf_table(cumulative_irf, var_names, target_indices=[2, 6], n_periods=8)
