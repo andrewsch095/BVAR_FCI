@@ -429,7 +429,7 @@ var_norm_names = {'GDP_(%)_m/m_real_2021': 'GDP',
              'real_eff_exchange_rate_index_m/m': 'Exch Rate',
              'Brent': 'Oil',
              'IMOEX': 'IMOEX',
-             'consumption_real_2021': 'Consump',
+             #'consumption_real_2021': 'Consump',
              'M2X': 'M2X',
              'exp_inf_firms_seas': 'Exp inf firm',
              'spread_diff': 'Spread',
@@ -677,7 +677,7 @@ def print_cumulative_irf_table(cumulative_irf, var_names, target_indices=[2, 6],
 data = pd.read_excel('/Users/scherbakovandrew/Documents/Model_gretl.xlsx')
 df = pd.DataFrame(data)
 df = pd.DataFrame({'Date': df['Date'], 'GPR': df['GPR'], 'Brent': df['Brent'], 'GDP_(%)_m/m_real_2021': df['GDP_(%)_m/m_real_2021'], 
-                   'consumption_real_2021': df['consumption_real_2021'], 'unempl': df['unempl'],
+                   'unempl': df['unempl'],
                    'net_exp': df['net_exp'], 'Inflation_m/m_without_seas': df['Inflation_m/m_without_seas'], 
                    'bud_balance': df['bud_balance'], 'gov_expan': df['gov_expan'], 'M2X': df['M2X'],
                    'Interest_rate_(%)': df['Interest_rate_(%)'], 'Fed_Bonds_10': df['Fed_Bonds_10'], 'nom_eff_exch_rate_index_m/m': df['nom_eff_exch_rate_index_m/m'],
@@ -711,11 +711,11 @@ for col in ['Interest_rate_(%)', 'exp_inf_firms_seas']:
     for i in range(1, len(df[col])):
         df[col][i] = (a[i]/100)/(a[i-1]/100) - 1
         
-for col in ['consumption_real_2021']:
-    #df[col] = df[col] - seasonal_decompose(df[col], model='additive', period=12).seasonal
-    a = list(df[col])
-    for i in range(1, len(df[col])):
-        df[col][i] = np.log(a[i]) - np.log(a[i-1]) 
+#for col in ['consumption_real_2021']:
+    ##df[col] = df[col] - seasonal_decompose(df[col], model='additive', period=12).seasonal
+    #a = list(df[col])
+    #for i in range(1, len(df[col])):
+        #df[col][i] = np.log(a[i]) - np.log(a[i-1]) 
     
 
 for col in ['Brent', 'M2X']:
@@ -763,7 +763,7 @@ def adf_test(series, title=''):
     print()
 
 for col in ['GDP_(%)_m/m_real_2021', 'Interest_rate_(%)', 'Inflation_m/m_without_seas', 'Fed_Bonds_10', 'real_eff_exchange_rate_index_m/m', 'Brent', 'IMOEX',
-            'consumption_real_2021', 'M2X', 'exp_inf_firms_seas', 'spread_diff', 'bud_balance', 'gov_expan', 'unempl', 'net_exp', 'nom_eff_exch_rate_index_m/m', 'GPR']:
+            'M2X', 'exp_inf_firms_seas', 'spread_diff', 'bud_balance', 'gov_expan', 'unempl', 'net_exp', 'nom_eff_exch_rate_index_m/m', 'GPR']:
     adf_test(df[col], title=col)
 
 df['Date'] = pd.to_datetime(df['Date'])
@@ -832,13 +832,28 @@ else:
 # Построение графиков импульсных откликов ВВП
 print("\nПостроение графиков импульсных откликов ВВП с доверительными интервалами...")
 plot_gdp_impulse_responses(irf_results, var_names, var_idx=2, n_periods=8)
-plot_gdp_impulse_responses(irf_results, var_names, var_idx=6, n_periods=8)
+plot_gdp_impulse_responses(irf_results, var_names, var_idx=5, n_periods=8)
 plot_cumulative_impulse_responses(cumulative_irf, var_names, var_idx=2, n_periods=8)
-plot_cumulative_impulse_responses(cumulative_irf, var_names, var_idx=6, n_periods=8)
+plot_cumulative_impulse_responses(cumulative_irf, var_names, var_idx=5, n_periods=8)
 #plot_gdp_impulse_responses(irf_results, var_names, var_idx=9, n_periods=6)
 
 
 # Вывод некоторых числовых результатов
 
 has_ci = irf_results['lower'] is not None and irf_results['upper'] is not None
-print_cumulative_irf_table(cumulative_irf, var_names, target_indices=[2, 6], n_periods=8)
+print_cumulative_irf_table(cumulative_irf, var_names, target_indices=[2, 5], n_periods=8)
+#for i, var_name in enumerate(var_names):
+    #if i == 0:  # Пропускаем сам ВВП
+        #continue
+    #print(f"\nШок {var_name}:")
+    #for t in range(5):
+        #median_val = irf_results['median'][0, i, t]
+        #if has_ci:
+            #lower_val = irf_results['lower'][0, i, t]
+            #upper_val = irf_results['upper'][0, i, t]
+            #print(f"  Период {t+1}: {median_val:.6f} [{lower_val:.6f}, {upper_val:.6f}]")
+        #else:
+            #print(f"  Период {t+1}: {median_val:.6f}")
+            
+
+
