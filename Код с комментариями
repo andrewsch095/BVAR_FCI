@@ -1,0 +1,869 @@
+# Импорты: библиотеки для численных вычислений, статистики, байесовского вывода и работы с данными
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from dataclasses import dataclass
+from typing import Dict, Any, Optional, Tuple
+from scipy.linalg import cho_factor, cho_solve, solve_triangular, LinAlgError
+from scipy.special import gammaln
+from scipy.stats import norm
+import warnings
+import statsmodels.api as sm
+from statsmodels.tsa.vector_ar.var_model import VAR
+from sklearn.preprocessing import StandardScaler
+from statsmodels.tsa.filters.hp_filter import hpfilter
+from openpyxl import load_workbook
+
+# Отключаем предупреждения для упрощения вывода
+warnings.filterwarnings("ignore")
+
+# Путь к файлу с данными
+excel_file = r'/Users/scherbakovandrew/Documents/Модель_new.xlsx'
+
+# Структура для хранения результатов оценки BVAR-модели
+@dataclass
+class VARResult:
+    """
+    Контейнер для результатов байесовской VAR-оценки.
+    
+    Поля:
+    - Y: матрица зависимых переменных (T-P × N)
+    - X: матрица регрессоров (T-P × K), где K = P*N + k_exog
+    - Y0: начальные P наблюдений (для реконструкции)
+    - prior: словарь с параметрами априорного распределения (не используется напрямую здесь, но полезен для расширения)
+    - logdensy: логарифм маргинальной (апостериорной) плотности данных — используется для сравнения моделей
+    - lags: количество лагов P
+    - beta: апостериорное среднее коэффициентов (K × N)
+    - sigma: апостериорное среднее ковариационной матрицы ошибок (N × N)
+    - beta_draws, sigma_draws: MCMC-выборки для построения доверительных интервалов и ИФР
+    """
+    Y: np.ndarray
+    X: np.ndarray  
+    Y0: np.ndarray
+    prior: Dict[str, Any]
+    logdensy: float
+    lags: int
+    beta: np.ndarray
+    sigma: np.ndarray
+    beta_draws: Optional[np.ndarray] = None
+    sigma_draws: Optional[np.ndarray] = None
+
+def _varlags(y: np.ndarray, P: int):
+    """
+    Формирует матрицы Y и X для VAR(P)-модели из исходных данных y.
+    
+    Теория: 
+    VAR(P)-модель: y_t = A_1 y_{t-1} + ... + A_P y_{t-P} + c + u_t,
+    где y_t ∈ ℝ^N, u_t ~ N(0, Σ).
+    
+    Здесь строится регрессионная форма: Y = X B + U,
+    где Y — (T-P) × N, X — (T-P) × (P*N), B — (P*N) × N.
+    """
+    T, N = y.shape
+    Y = y[P:, :]
+    X = np.empty((T - P, P * N))
+    for p in range(P):
+        X[:, p*N:(p+1)*N] = y[P-1-p:T-1-p, :]
+    return Y, X
+
+def _logdet(A: np.ndarray) -> float:
+    """
+    Вычисляет логарифм определителя матрицы, защищаясь от численных ошибок.
+    Используется в формуле для логарифма маргинальной плотности.
+    """
+    try:
+        sign, logdet = np.linalg.slogdet(A)
+        return logdet if sign > 0 else -np.inf
+    except:
+        return -np.inf
+
+def _multgammaln(N: int, a: float) -> float:
+    """
+    Логарифм многомерной гамма-функции Γ_N(a), которая возникает в нормализующей константе 
+    обратного уишартовского распределения — априорного распределения для Σ.
+    
+    Формула: log Γ_N(a) = (N(N-1)/4) log(π) + Σ_{j=1}^N log Γ(a - (j-1)/2)
+    """
+    result = 0.25 * N * (N - 1) * np.log(np.pi)
+    for j in range(N):
+        result += gammaln(a - 0.5 * j)
+    return result
+
+def var_dummyobsprior(y: np.ndarray,
+                      w: np.ndarray,
+                      n_draws: int,
+                      info: Dict[str, Any],
+                      verbosity: int = 1) -> VARResult:
+    """
+    Основная функция для оценки BVAR модели методом фиктивных наблюдений (Sims, 1988).
+    
+    Идея: Байесовское априорное распределение на коэффициенты и Σ можно имитировать,
+    добавив искусственные «фиктивные» наблюдения к данным. Это эквивалентно использованию
+    нормального-обратного уишартовского априорного распределения.
+    
+    Поддерживается:
+      - Minnesota prior (сжатие коэффициентов к нулю, особенно на кросс-лаги)
+      - Возможность задать фиксированные фиктивные наблюдения вручную
+    """
+
+    Tfull, N = y.shape
+    P = int(info.get("lags", 1))
+    if P <= 0:
+        raise ValueError("info.lags must be >=1")
+
+    T = Tfull - P
+    k_exog = 0 if w is None else w.shape[1]
+    K = P * N + k_exog
+
+    if verbosity:
+        print("VAR_dummyobsprior")
+        print(f"lags: {P}")
+
+    # Инициализация фиктивных наблюдений
+    if "dummyobs" in info:
+        # Пользователь задаёт Yprior, Xprior и vprior вручную
+        Yprior = np.asarray(info["dummyobs"].get("Y"))
+        Xprior = np.asarray(info["dummyobs"].get("X"))
+        vprior = float(info["dummyobs"].get("v", 0.0))
+    else:
+        # Начинаем с пустых фиктивных наблюдений
+        Yprior = np.zeros((0, N))
+        Xprior = np.zeros((0, K))
+        vprior = 0.0
+
+    # Построение Minnesota prior через фиктивные наблюдения
+    mn = info.get("minnesota", {})
+    if "tightness" in mn and not np.isinf(mn["tightness"]):
+        """
+        Minnesota prior — слабоинформативный априор, который:
+          - сжимает все коэффициенты к нулю,
+          - особенно сильно сжимает кросс-лаги (переменная i на лаг переменной j ≠ i),
+          - предполагает, что собственные лаги близки к случайной блуждающей (unit root),
+            но с небольшим затуханием.
+        
+        Формально:
+          E[β_{ij,s}] = 0 для i ≠ j,
+          E[β_{ii,1}] = m_i (обычно = 1, но можно задать иначе),
+          Var(β_{ij,s}) = (λ² / s^{2d}) * (σ_i² / σ_j²),
+        где:
+          - λ = tightness (степень сжатия),
+          - d = decay (скорость убывания важности удалённых лагов),
+          - σ_i — стандартное отклонение остатков AR-модели для переменной i.
+        
+        Здесь реализуется через фиктивные наблюдения:
+          Для каждой переменной i строится K фиктивных наблюдений с весами = 1/std.
+        """
+        exog_std = float(mn.get("exog_std", 1e8))  # Практически неинформативный приор на экзогенные переменные
+        decay = float(mn.get("decay", 1))
+
+        # Оценка σ_i через AR(σ_arlags) для каждой переменной
+        if "sigma" not in mn:
+            sigma_data = np.asarray(mn.get("sigma_data", y))
+            sigma = np.zeros(N)
+            sigma_arlags = int(mn.get("sigma_arlags", max(0, min(P, sigma_data.shape[0] - 3))))
+            for n in range(N):
+                if sigma_arlags == 0:
+                    resid = sigma_data[:, n] - np.mean(sigma_data[:, n])
+                else:
+                    yn, ylagsn = _varlags(sigma_data[:, [n]], sigma_arlags)
+                    Xn = np.hstack([ylagsn, np.ones((yn.shape[0], 1))])
+                    bn, *_ = np.linalg.lstsq(Xn, yn, rcond=None)
+                    resid = yn.flatten() - (Xn @ bn).flatten()
+                sigma[n] = np.std(resid, ddof=1)
+            mn["sigma"] = sigma
+        else:
+            sigma = np.asarray(mn["sigma"]).astype(float)
+
+        if "sigma_factor" in mn:
+            sigma = sigma * float(mn["sigma_factor"])
+
+        # Вектор mvector задаёт априорные средние для собственных первых лагов
+        mvector = np.asarray(mn.get("mvector", np.ones(N)))[:N]
+
+        Yprior_list = [Yprior]
+        Xprior_list = [Xprior]
+
+        # Для каждого уравнения i (переменная y_i)
+        for i in range(N):
+            stds_i = []
+            # Для каждого лага s = 1...P и каждой переменной j = 1...N
+            for s in range(1, P + 1):
+                for j in range(N):
+                    # Стандартное отклонение априорного распределения β_{ij,s}
+                    std_ij_s = float(mn["tightness"]) * (1.0 / (s ** decay)) * (sigma[i] / sigma[j])
+                    stds_i.append(std_ij_s)
+            # Экзогенные переменные: неинформативный приор
+            stds_i.extend([exog_std] * k_exog)
+            stds_i = np.array(stds_i)
+
+            # Веса = 1 / std — это диагональная матрица W^{-1}
+            weights_i = 1.0 / stds_i
+            Winv_mat_i = np.diag(weights_i)
+
+            # Априорное среднее B0_i: только β_{ii,1} может быть ≠ 0
+            B0_i = np.zeros(K)
+            if P >= 1:
+                B0_i[i] = mvector[i]  # β_{ii,1} = m_i
+
+            # Фиктивное наблюдение: Y_dummy_i = W^{-1} B0_i, X_dummy_i = W^{-1}
+            Y_dummy_i = np.zeros((K, N))
+            Y_dummy_i[:, i] = Winv_mat_i @ B0_i
+            X_dummy_i = Winv_mat_i
+
+            Yprior_list.append(Y_dummy_i)
+            Xprior_list.append(X_dummy_i)
+
+        # Объединяем все фиктивные наблюдения
+        Yprior = np.vstack(Yprior_list)
+        Xprior = np.vstack(Xprior_list)
+
+        # Априор на ковариационную матрицу Σ:
+        # Σ ~ Inv-Wishart(vprior, S0), где S0 = diag(σ_i² * (vprior - N - 1))
+        sigma_deg = float(mn.get("sigma_deg", N + 2))
+        if sigma_deg <= N - 1:
+            warnings.warn(f"Improper prior for Sigma: sigma_deg ({sigma_deg}) <= N-1 ({N-1})")
+        
+        scale_factor = max(sigma_deg - N - 1, 1e-12)
+        Z = np.diag(sigma * np.sqrt(scale_factor))
+        Yprior = np.vstack([Yprior, Z])
+        Xprior = np.vstack([Xprior, np.zeros((N, K))])
+        vprior += sigma_deg
+
+        if verbosity:
+            print("Minnesota prior")
+            print(f"Lambda (tightness): {mn['tightness']}")
+            print(f"Decay: {decay}")
+            print(f"Sigma: {sigma}")
+            print(f"sigma_deg: {sigma_deg}")
+            print(f"Note: proper prior requires sigma_deg > {N - 1}")
+            print(f"Note: E[Sigma] exists if sigma_deg > {N + 1}")
+
+    # Формируем регрессионные матрицы из реальных данных
+    Y, X = _varlags(y, P)
+    if k_exog > 0:
+        X = np.hstack([X, w[P:, :]])
+    Y0 = y[:P, :]
+
+    # Объединяем реальные и фиктивные наблюдения
+    Yst = np.vstack([Yprior, Y]) if Yprior.size else Y
+    Xst = np.vstack([Xprior, X]) if Xprior.size else X
+
+    # Вычисление логарифма маргинальной плотности (для сравнения моделей)
+    if Xprior.size:
+        logdetXtXprior = _logdet(Xprior.T @ Xprior)
+        Bprior, *_ = np.linalg.lstsq(Xprior, Yprior, rcond=None)
+        Uprior = Yprior - Xprior @ Bprior
+        Sprior = Uprior.T @ Uprior
+        logdetSprior = _logdet(Sprior)
+    else:
+        logdetXtXprior = 0.0
+        Sprior = np.eye(N)
+        logdetSprior = 0.0
+
+    logdetXtXst = _logdet(Xst.T @ Xst)
+    Bst, *_ = np.linalg.lstsq(Xst, Yst, rcond=None)
+    Ust = Yst - Xst @ Bst
+    Sst = Ust.T @ Ust
+    logdetSst = _logdet(Sst)
+
+    # Формула: log p(y) = -0.5*N*T*log(π) + 0.5*N*(log|X'X|_prior - log|X'X|_total)
+    #                   + logΓ_N((T + ν)/2) - logΓ_N(ν/2)
+    #                   + 0.5*ν*log|S0| - 0.5*(T + ν)*log|S_post|
+    logdensy = (-0.5 * N * T * np.log(np.pi)
+                + 0.5 * N * (logdetXtXprior - logdetXtXst)
+                + _multgammaln(N, 0.5 * (T + vprior)) - _multgammaln(N, 0.5 * vprior)
+                + 0.5 * vprior * logdetSprior - 0.5 * (T + vprior) * logdetSst)
+
+    # Апостериорные моменты
+    beta = Bst 
+    sigma = Sst / max(T + vprior - N - 1, 1.0)
+
+    # Генерация MCMC-выборок из апостериорного распределения
+    beta_draws = None
+    sigma_draws = None
+    if n_draws and n_draws > 0:
+        nf = int(round(T + vprior))  # степени свободы апостериорного распределения Σ
+
+        # Инверсия (X'X) через разложение Холецкого для стабильности
+        XtX = Xst.T @ Xst
+        cF, lower = cho_factor(XtX)
+        chol_inv = solve_triangular(cF, np.eye(cF.shape[0]), lower=lower)
+        XtXinv_chol = chol_inv.T
+
+        # Холецкий для Sst (матрица масштаба)
+        try:
+            Sst_chol = np.linalg.cholesky(Sst)
+        except LinAlgError:
+            Sst_chol = np.linalg.cholesky(Sst + 1e-10 * np.eye(N))
+
+        beta_draws = np.empty((K, N, n_draws))
+        sigma_draws = np.empty((N, N, n_draws))
+        rng = np.random.default_rng(42)
+
+        for d in range(n_draws):
+            # Σ ~ Inv-Wishart(nf, Sst) → генерируется через Z ~ N(0, I)
+            Z = rng.standard_normal(size=(nf, N))
+            IW = np.linalg.inv(Z.T @ Z)
+            Sigma_draw = Sst_chol @ IW @ Sst_chol.T
+
+            # β | Σ ~ MatrixNormal(Bst, (X'X)^{-1}, Σ)
+            E = rng.standard_normal(size=(K, N))
+            B_draw = Bst + XtXinv_chol @ E @ np.linalg.cholesky(Sigma_draw)
+
+            beta_draws[:, :, d] = B_draw
+            sigma_draws[:, :, d] = Sigma_draw
+
+    return VARResult(
+        Y=Y,
+        X=X,
+        Y0=Y0,
+        prior={},
+        logdensy=float(logdensy),
+        lags=P,
+        beta=beta,
+        sigma=sigma,
+        beta_draws=beta_draws,
+        sigma_draws=sigma_draws
+    )
+
+
+# -----------------------------
+# Вспомогательные функции для анализа результатов
+# -----------------------------
+
+def print_shock_sizes(var_result, var_names, y_data, shock_size=1.0, var_norm_names=None):
+    """
+    Печатает таблицу, показывающую абсолютный и относительный размер структурного шока,
+    полученного через разложение Холецкого ковариационной матрицы остатков.
+    
+    Цель: помочь интерпретировать величину "единичного шока" — насколько он велик по сравнению с данными.
+    """
+    if var_norm_names is None:
+        var_norm_names = {name: name for name in var_names}
+    
+    sigma = var_result.sigma
+    try:
+        chol_sigma = np.linalg.cholesky(sigma)
+    except np.linalg.LinAlgError:
+        chol_sigma = np.linalg.cholesky(sigma + 1e-10 * np.eye(sigma.shape[0]))
+    
+    resid_std = np.sqrt(np.diag(sigma))
+    structural_shock_std = np.diag(chol_sigma)
+    applied_shock = shock_size * structural_shock_std
+    mean_abs = np.nanmean(np.abs(y_data), axis=0)
+    relative_shock = np.divide(applied_shock, mean_abs, out=np.full_like(applied_shock, np.nan), where=mean_abs != 0)
+    
+    display_names = [var_norm_names.get(name, name) for name in var_names]
+    
+    shock_table = pd.DataFrame({
+        'Variable': display_names,
+        'Mean(|x|) (Data)': mean_abs,
+        'Residual Std (Reduced Form)': resid_std,
+        'Structural Shock Std (Cholesky)': structural_shock_std,
+        f'Applied Shock Size (×{shock_size})': applied_shock,
+        'Shock / Mean(|x|)': relative_shock
+    })
+    
+    print(shock_table.round(6).to_string(index=False))
+    return shock_table
+
+
+def compute_impulse_responses(var_result: VARResult, n_periods: int = 20, shock_size: float = 1.0, confidence_level: float = 0.90):
+    """
+    Вычисляет импульсные отклики (ИФР) на структурные шоки, используя разложение Холецкого.
+    
+    Если доступны MCMC-выборки:
+      - Для каждой выборки строится ИФР → получаем выборочное распределение ИФР.
+      - Строятся классические (нормальные) доверительные интервалы на основе среднего и стандартной ошибки.
+    
+    Если MCMC нет — только точечная оценка.
+    
+    Важно: порядок переменных в y_full определяет порядок Холецкого → интерпретацию причинности.
+    """
+    P = var_result.lags
+    N = var_result.sigma.shape[0]
+    n_draws = var_result.beta_draws.shape[2] if var_result.beta_draws is not None else 0
+    
+    if n_draws > 0:
+        irf_draws = np.zeros((N, N, n_periods, n_draws))
+        
+        for draw in range(n_draws):
+            beta_draw = var_result.beta_draws[:, :, draw]
+            sigma_draw = var_result.sigma_draws[:, :, draw]
+            
+            # Восстанавливаем матрицы A_1, ..., A_P из вектора beta
+            A = beta_draw[:P*N, :].T
+            A = A.reshape(N, P, N)
+            
+            # Холецкий для текущей выборки Σ
+            try:
+                chol_sigma = np.linalg.cholesky(sigma_draw)
+            except:
+                chol_sigma = np.linalg.cholesky(sigma_draw + 1e-10 * np.eye(N))
+            
+            # Преобразуем VAR(P) в VAR(1) в companion-форме
+            if P > 1:
+                F = np.zeros((N*P, N*P))
+                F[:N, :] = A.reshape(N, P*N)
+                F[N:, :N*(P-1)] = np.eye(N*(P-1))
+            else:
+                F = A.reshape(N, N)
+            
+            # Матрица шоков для companion-формы
+            if P > 1:
+                G = np.zeros((N*P, N))
+                G[:N, :] = chol_sigma
+            else:
+                G = chol_sigma
+            
+            # Итеративное вычисление Φ_h = F^h
+            if P > 1:
+                Phi = np.eye(N*P)
+            else:
+                Phi = np.eye(N)
+            
+            for h in range(n_periods):
+                if P > 1:
+                    irf_draws[:, :, h, draw] = (Phi @ G)[:N, :] * shock_size
+                    Phi = Phi @ F
+                else:
+                    irf_draws[:, :, h, draw] = Phi @ G * shock_size
+                    Phi = Phi @ F
+        
+        # Агрегация по MCMC-выборкам
+        irf_mean = np.mean(irf_draws, axis=3)
+        irf_std = np.std(irf_draws, axis=3, ddof=1)
+        se_mean = irf_std / np.sqrt(n_draws)
+        alpha = 1 - confidence_level
+        z_critical = norm.ppf(1 - alpha/2)
+        irf_lower = irf_mean - z_critical * se_mean
+        irf_upper = irf_mean + z_critical * se_mean
+        
+        print(f"Используется {confidence_level*100:.1f}% доверительный интервал")
+        print(f"Критическое значение (z): {z_critical:.3f}")
+        
+        return {
+            'mean': irf_mean,
+            'std': irf_std,
+            'se_mean': se_mean,
+            'lower': irf_lower,
+            'upper': irf_upper,
+            'draws': irf_draws,
+            'confidence_level': confidence_level,
+            'method': 'classical_normal'
+        }
+    
+    else:
+        # Точечная оценка без интервалов
+        beta = var_result.beta
+        A = beta[:P*N, :].T
+        A = A.reshape(N, P, N)
+        
+        try:
+            chol_sigma = np.linalg.cholesky(var_result.sigma)
+        except:
+            chol_sigma = np.linalg.cholesky(var_result.sigma + 1e-10 * np.eye(N))
+        
+        if P > 1:
+            F = np.zeros((N*P, N*P))
+            F[:N, :] = A.reshape(N, P*N)
+            F[N:, :N*(P-1)] = np.eye(N*(P-1))
+        else:
+            F = A.reshape(N, N)
+        
+        if P > 1:
+            G = np.zeros((N*P, N))
+            G[:N, :] = chol_sigma
+        else:
+            G = chol_sigma
+        
+        irf = np.zeros((N, N, n_periods))
+        if P > 1:
+            Phi = np.eye(N*P)
+        else:
+            Phi = np.eye(N)
+        
+        for h in range(n_periods):
+            if P > 1:
+                irf[:, :, h] = (Phi @ G)[:N, :] * shock_size
+                Phi = Phi @ F
+            else:
+                irf[:, :, h] = Phi @ G * shock_size
+                Phi = Phi @ F
+        
+        return {'mean': irf, 'lower': None, 'upper': None, 'method': 'point_estimate'}
+
+
+var_norm_names = {
+    'GDP_(%)_m/m_real_2021': 'GDP', 
+    'Interest_rate_(%)': 'Int Rate', 
+    'Inflation_m/m_without_seas': 'Inflation', 
+    'Fed_Bonds_10': 'Bonds 10',
+    'Brent': 'Oil',
+    'IMOEX': 'IMOEX',
+    'consumption_real_2021': 'Consump',
+    'M2X': 'M2X',
+    'exp_inf_firms_seas': 'Exp inf firm',
+    'spread_diff': 'Spread',
+    'gov_expan': 'Expances',
+    'unempl': 'Unemployment',
+    'net_exp': 'Net export',
+    'GPR': 'Geopolitics',
+    'real_eff_exchange_rate_index_m/m': 'Exch Rate',
+    'nom_eff_exch_rate_index_m/m': 'Nom Exch Rate',
+    'credits': 'Credits'
+}
+
+
+def plot_gdp_impulse_responses(irf_results, var_names, var_idx=0, n_periods=20):
+    """
+    Строит графики импульсных откликов одной целевой переменной (например, ВВП) 
+    на шоки всех остальных переменных.
+    
+    Показывает:
+      - Средний отклик
+      - Доверительные интервалы (если доступны)
+      - Накопленный мультипликативный эффект (через (1+irf_1)*(1+irf_2)*...)
+    """
+    n_vars = len(var_names)
+    n_shocks = n_vars - 1
+    fig, axes = plt.subplots(4, 4, figsize=(20, 15))
+    axes = axes.flatten()
+    
+    has_ci = irf_results['lower'] is not None and irf_results['upper'] is not None
+    method = irf_results.get('method', 'unknown')
+    confidence_level = irf_results.get('confidence_level', 0.90)
+    
+    shock_idx = 0
+    for i in range(n_vars):
+        if i == var_idx:
+            continue
+            
+        ax = axes[shock_idx]
+        response_mean = irf_results['mean'][var_idx, i, :n_periods]
+        
+        # Расчёт кумулятивного мультипликативного эффекта: ∏(1 + IRF_h)
+        irf_final = 1.0
+        for irfss in response_mean:
+            irf_final *= (1 + irfss)
+        print(f'{var_names[i]}, {irf_final - 1:.6f}')
+        
+        periods = np.arange(n_periods)
+        label_main = f'IRF (Mean)' if method == 'classical_normal' else 'IRF'
+        ax.plot(periods, response_mean, 'b-', linewidth=2.5, label=label_main)
+        
+        if has_ci:
+            response_lower = irf_results['lower'][var_idx, i, :n_periods]
+            response_upper = irf_results['upper'][var_idx, i, :n_periods]
+            ci_label = f'{confidence_level*100:.0f}% CI (Normal)' if method == 'classical_normal' else f'{confidence_level*100:.0f}% CI'
+            ax.fill_between(periods, response_lower, response_upper, alpha=0.3, color='lightblue', label=ci_label)
+            ax.plot(periods, response_lower, '--', color='navy', alpha=0.7, linewidth=1)
+            ax.plot(periods, response_upper, '--', color='navy', alpha=0.7, linewidth=1)
+            
+            if 'se_mean' in irf_results:
+                se_mean = irf_results['se_mean'][var_idx, i, :n_periods]
+                print(f"Стандартная ошибка для {var_names[i]} в период 1: {se_mean[0]:.6f}")
+        
+        ax.axhline(y=0, color='k', linestyle='-', alpha=0.4, linewidth=0.8)
+        ax.set_title(f'{var_norm_names.get(var_names[var_idx])} response to {var_norm_names.get(var_names[i])} shock', fontsize=11, fontweight='bold')
+        ax.set_xlabel('Periods', fontsize=10)
+        ax.set_ylabel('Response', fontsize=10)
+        ax.grid(True, alpha=0.3)
+        
+        if shock_idx == 0:
+            ax.legend(fontsize=9, loc='upper right')
+        ax.tick_params(axis='both', which='major', labelsize=9)
+        
+        y_max = np.max(np.abs(response_mean))
+        if has_ci:
+            ci_max = max(np.max(np.abs(response_lower)), np.max(np.abs(response_upper)))
+            y_max = max(y_max, ci_max)
+        if y_max > 0:
+            ax.set_ylim(-y_max * 1.1, y_max * 1.1)
+        
+        shock_idx += 1
+    
+    for i in range(shock_idx, len(axes)):
+        fig.delaxes(axes[i])
+    
+    ci_method_text = "Classical Normal Distribution" if method == 'classical_normal' else "Percentile-based"
+    plt.suptitle(f'Impulse Response Functions: {var_norm_names.get(var_names[var_idx])} Response to Structural Shocks\n(with {confidence_level*100:.0f}% Confidence Intervals using {ci_method_text})', 
+                fontsize=14, fontweight='bold', y=0.98)
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.show()
+
+
+def compute_cumulative_irf(irf_results):
+    """
+    Вычисляет *накопленный* (аддитивный) эффект ИФР: cum_IRF[h] = Σ_{s=0}^{h} IRF[s].
+    
+    Это полезно для оценки долгосрочного эффекта шока.
+    """
+    cum_irf = {}
+    for key in irf_results:
+        if key not in ['mean', 'median', 'lower', 'upper', 'std', 'se_mean', 'draws']:
+            cum_irf[key] = irf_results[key]
+    
+    if 'mean' in irf_results:
+        mean_irf = irf_results['mean']
+        N, _, n_periods = mean_irf.shape
+        cum_mean = np.zeros_like(mean_irf)
+        for i in range(N):
+            for j in range(N):
+                cumulative_sum = 0.0
+                for h in range(n_periods):
+                    cumulative_sum += mean_irf[i, j, h]
+                    cum_mean[i, j, h] = cumulative_sum
+        cum_irf['mean'] = cum_mean
+
+    if 'draws' in irf_results and irf_results['draws'] is not None:
+        draws = irf_results['draws']
+        N, _, n_periods, n_draws = draws.shape
+        cum_draws = np.zeros_like(draws)
+        for d in range(n_draws):
+            for i in range(N):
+                for j in range(N):
+                    cumulative_sum = 0.0
+                    for h in range(n_periods):
+                        cumulative_sum += draws[i, j, h, d]
+                        cum_draws[i, j, h, d] = cumulative_sum
+        
+        cum_irf['draws'] = cum_draws
+        cum_irf['mean'] = np.mean(cum_draws, axis=3)
+        cum_irf['std'] = np.std(cum_draws, axis=3, ddof=1)
+        cum_irf['se_mean'] = cum_irf['std'] / np.sqrt(n_draws)
+        
+        if 'confidence_level' in irf_results:
+            alpha = 1 - irf_results['confidence_level']
+            z_critical = norm.ppf(1 - alpha/2)
+            cum_irf['lower'] = cum_irf['mean'] - z_critical * cum_irf['se_mean']
+            cum_irf['upper'] = cum_irf['mean'] + z_critical * cum_irf['se_mean']
+    
+    return cum_irf
+
+
+def plot_cumulative_impulse_responses(irf_results, var_names, var_idx=0, n_periods=20):
+    """
+    График накопленных (аддитивных) импульсных откликов.
+    """
+    n_vars = len(var_names)
+    fig, axes = plt.subplots(4, 4, figsize=(20, 15))
+    axes = axes.flatten()
+    
+    has_ci = irf_results['lower'] is not None and irf_results['upper'] is not None
+    method = irf_results.get('method', 'unknown')
+    confidence_level = irf_results.get('confidence_level', 0.90)
+    
+    shock_idx = 0
+    for i in range(n_vars):
+        if i == var_idx:
+            continue
+            
+        ax = axes[shock_idx]
+        response_mean = irf_results['mean'][var_idx, i, :n_periods]
+        periods = np.arange(n_periods)
+        
+        label_main = 'Cumulative IRF (Mean)' if method == 'classical_normal' else 'Cumulative IRF'
+        ax.plot(periods, response_mean, 'b-', linewidth=2.5, label=label_main)
+        
+        if has_ci:
+            response_lower = irf_results['lower'][var_idx, i, :n_periods]
+            response_upper = irf_results['upper'][var_idx, i, :n_periods]
+            ci_label = f'{confidence_level*100:.0f}% CI (Normal)' if method == 'classical_normal' else f'{confidence_level*100:.0f}% CI'
+            ax.fill_between(periods, response_lower, response_upper, alpha=0.3, color='lightblue', label=ci_label)
+            ax.plot(periods, response_lower, '--', color='navy', alpha=0.7, linewidth=1)
+            ax.plot(periods, response_upper, '--', color='navy', alpha=0.7, linewidth=1)
+        
+        ax.axhline(y=0, color='k', linestyle='-', alpha=0.4, linewidth=0.8)
+        ax.set_title(f'Cumulative {var_norm_names.get(var_names[var_idx])} response to {var_norm_names.get(var_names[i])} shock', 
+                     fontsize=11, fontweight='bold')
+        ax.set_xlabel('Periods', fontsize=10)
+        ax.set_ylabel('Cumulative Response', fontsize=10)
+        ax.grid(True, alpha=0.3)
+        
+        if shock_idx == 0:
+            ax.legend(fontsize=9, loc='upper right')
+        ax.tick_params(axis='both', which='major', labelsize=9)
+        
+        y_max = np.max(np.abs(response_mean))
+        if has_ci:
+            ci_max = max(np.max(np.abs(response_lower)), np.max(np.abs(response_upper)))
+            y_max = max(y_max, ci_max)
+        if y_max > 0:
+            ax.set_ylim(-y_max * 1.1, y_max * 1.1)
+        
+        shock_idx += 1
+    
+    for i in range(shock_idx, len(axes)):
+        fig.delaxes(axes[i])
+    
+    ci_method_text = "Classical Normal Distribution" if method == 'classical_normal' else "Percentile-based"
+    plt.suptitle(f'Cumulative Impulse Response Functions: {var_norm_names.get(var_names[var_idx])} Response\n(with {confidence_level*100:.0f}% CIs using {ci_method_text})', 
+                 fontsize=14, fontweight='bold', y=0.98)
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.show()
+
+
+def print_cumulative_irf_table(cumulative_irf, var_names, target_indices=[2, 6], n_periods=None):
+    """
+    Печатает таблицу с кумулятивными эффектами шоков на выбранные целевые переменные
+    на последнем периоде.
+    """
+    if n_periods is None:
+        n_periods = cumulative_irf['mean'].shape[2]
+    last_period_idx = n_periods - 1
+
+    shock_names = [var_norm_names.get(name, name) for name in var_names]
+    table_data = {}
+    
+    for target_idx in target_indices:
+        target_name = var_norm_names.get(var_names[target_idx], var_names[target_idx])
+        responses = cumulative_irf['mean'][target_idx, :, last_period_idx]
+        table_data[target_name] = responses 
+    
+    df_table = pd.DataFrame(table_data, index=shock_names)
+    print(f"\nКумулятивные импульсные отклики за период {last_period_idx + 1} (в %):")
+    print("=" * 70)
+    print(df_table.round(4).to_string())
+    print("=" * 70)
+
+
+# -----------------------------
+# Загрузка и предварительная обработка данных
+# -----------------------------
+
+data = pd.read_excel('/Users/scherbakovandrew/Documents/test_data_fci.xlsx')
+df = pd.DataFrame(data)
+df = pd.DataFrame({
+    'Date': df['Date'], 
+    'GPR': df['GPR'], 
+    'Brent': df['Brent'], 
+    'GDP_(%)_m/m_real_2021': df['GDP_(%)_m/m_real_2021'], 
+    'unempl': df['unempl'], 
+    'consumption_real_2021': df['consumption_real_2021'], 
+    'net_exp': df['net_exp'],
+    'gov_expan': df['gov_expan'], 
+    'credits': df['credits'],
+    'Inflation_m/m_without_seas': df['Inflation_m/m_without_seas'],
+    'nom_eff_exch_rate_index_m/m': df['nom_eff_exch_rate_index_m/m'],
+    'real_eff_exchange_rate_index_m/m': df['real_eff_exchange_rate_index_m/m'],
+    'spread_diff': df['spread_diff'], 
+    'IMOEX': df['IMOEX'], 
+    'Interest_rate_(%)': df['Interest_rate_(%)'], 
+    'Fed_Bonds_10': df['Fed_Bonds_10'], 
+    'M2X': df['M2X'],
+    'exp_inf_firms_seas': df['exp_inf_firms_seas']
+})
+
+# Преобразование переменных в темпы роста (логарифмические приросты)
+# Это необходимо для стационарности и интерпретируемости VAR
+
+# ВВП: лог-приросты
+for col in ['GDP_(%)_m/m_real_2021']:
+    a = list(df[col])
+    for i in range(1, len(df[col])):
+        df[col][i] = np.log(a[i]) - np.log(a[i-1])
+
+# Акции, потребление, кредиты и т.д. — также в лог-приростах
+for col in ['IMOEX', 'GPR', 'consumption_real_2021', 'credits']:
+    a = list(df[col])
+    for i in range(1, len(df[col])):
+        df[col][i] = np.log(a[i]) - np.log(a[i-1])
+
+# Процентные ставки и безработица — в разностях (уровни уже в %)
+for col in ['Interest_rate_(%)', 'unempl', 'Fed_Bonds_10']:
+    a = list(df[col])
+    for i in range(1, len(df[col])):
+        df[col][i] = a[i]/100 - a[i-1]/100
+
+# Цены на нефть, агрегаты М2, госрасходы и т.д. — лог-приросты
+for col in ['Brent', 'M2X', 'gov_expan', 'net_exp']:
+    a = list(df[col])
+    for i in range(1, len(df[col])):
+        df[col][i] = np.log(a[i]) - np.log(a[i-1])
+
+# Удаляем первую строку (NaN после дифференцирования)
+df = df.drop(index=0).reset_index(drop=True)
+
+# Тест Дики-Фуллера на стационарность
+def adf_test(series, title=''):
+    result = adfuller(series.dropna())
+    print(f'ADF Test for {title}')
+    print('ADF Statistic: %f' % result[0])
+    print('p-value: %f' % result[1])
+    print('Critical Values:')
+    for key, value in result[4].items():
+        print('\t%s: %.3f' % (key, value))
+    print()
+
+for col in df.columns:
+    if col != 'Date':
+        adf_test(df[col], title=col)
+
+# Установка даты как индекса и численное преобразование
+df['Date'] = pd.to_datetime(df['Date'])
+df.set_index('Date', inplace=True)
+df = df.apply(pd.to_numeric, errors='coerce')
+var_names = df.columns.tolist()
+
+# Сохранение обработанных данных
+with pd.ExcelWriter(excel_file, engine='xlsxwriter') as writer:
+    df.to_excel(writer, sheet_name='Data', index=False)
+
+y_full = df.values
+print("Данные загружены:")
+print(f"Размерность: {y_full.shape}")
+print(f"Переменные: {var_names}")
+
+# Стандартизация не применяется, так как BVAR работает с уровнями/темпами напрямую
+# scaler = StandardScaler()
+# y_scaled = scaler.fit_transform(y_full)
+
+# -----------------------------
+# Оценка BVAR модели
+# -----------------------------
+
+info = {
+    'lags': 2,  # VAR(2)
+    'minnesota': {
+        'tightness': 0.5,      # Умеренное сжатие
+        'sigma_deg': len(var_names) + 5,  # Надёжный приор на Σ
+        'decay': 1.5,          # Быстрое затухание весов лагов
+        'sigma_arlags': 1      # AR(1) для оценки σ_i
+    }
+}
+
+print("\nОценка BVAR модели...")
+var_result = var_dummyobsprior(y_full, None, n_draws=5000, info=info, verbosity=1)
+
+print(f"\nРезультаты оценки:")
+print(f"Логарифмическая маргинальная плотность: {var_result.logdensy:.2f}")
+print(f"Количество лагов: {var_result.lags}")
+print(f"Размерность beta: {var_result.beta.shape}")
+print(f"Размерность sigma: {var_result.sigma.shape}")
+
+# -----------------------------
+# Анализ результатов
+# -----------------------------
+
+shock_table = print_shock_sizes(var_result, var_names, y_data=y_full, shock_size=1.0, var_norm_names=var_norm_names)
+
+print("\nВычисление импульсных откликов...")
+irf_results = compute_impulse_responses(var_result, n_periods=8, shock_size=1.0)
+cumulative_irf = compute_cumulative_irf(irf_results)
+
+if 'draws' in irf_results and irf_results['draws'] is not None:
+    print(f"Размерность IRF draws: {irf_results['draws'].shape}")
+    print("Доверительные интервалы будут построены на основе MCMC выборок")
+else:
+    print("Доверительные интервалы недоступны (нет MCMC выборок)")
+
+# Построение графиков
+print("\nПостроение графиков импульсных откликов...")
+plot_gdp_impulse_responses(irf_results, var_names, var_idx=2, n_periods=4)  # Инфляция
+plot_gdp_impulse_responses(irf_results, var_names, var_idx=8, n_periods=4)  # Инфляция (повторно, возможно, опечатка)
+plot_cumulative_impulse_responses(cumulative_irf, var_names, var_idx=2, n_periods=4)
+plot_cumulative_impulse_responses(cumulative_irf, var_names, var_idx=8, n_periods=4)
+
+# Таблица кумулятивных эффектов
+print_cumulative_irf_table(cumulative_irf, var_names, target_indices=[2, 8], n_periods=4)
