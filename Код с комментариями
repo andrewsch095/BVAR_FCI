@@ -1,18 +1,41 @@
-# Импорты: библиотеки для численных вычислений, статистики, байесовского вывода и работы с данными
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
-from typing import Dict, Any, Optional, Tuple
-from scipy.linalg import cho_factor, cho_solve, solve_triangular, LinAlgError
+from typing import Dict, Any, Optional
+from scipy.linalg import cho_factor, solve_triangular
+from scipy.linalg import LinAlgError
 from scipy.special import gammaln
 from scipy.stats import norm
 import warnings
-import statsmodels.api as sm
-from statsmodels.tsa.vector_ar.var_model import VAR
+from scipy import stats
 from sklearn.preprocessing import StandardScaler
+import pandas as pd
+import numpy as np
+import arviz as az
+import pymc as pm
+from scipy.stats import norm
+import matplotlib.pyplot as plt
+from statsmodels.tsa.ar_model import AutoReg
+from scipy.signal import detrend
+import statsmodels.api as sm
+from statsmodels.tsa.seasonal import seasonal_decompose
+from statsmodels.tsa.stattools import adfuller, grangercausalitytests
+from statsmodels.tools.eval_measures import rmse, aic
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.linalg import solve
 from statsmodels.tsa.filters.hp_filter import hpfilter
 from openpyxl import load_workbook
+from statsmodels.tsa.vector_ar.var_model import VAR
+from sklearn.preprocessing import StandardScaler
+import warnings
+#from __future__ import annotations
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Tuple
+from numpy.linalg import LinAlgError
+from scipy.linalg import cho_factor, cho_solve, solve_triangular
+from scipy.special import gammaln
 
 # Отключаем предупреждения для упрощения вывода
 warnings.filterwarnings("ignore")
