@@ -757,26 +757,37 @@ def print_cumulative_irf_table(cumulative_irf, var_names, target_indices=[2, 6],
 
 data = pd.read_excel('/Users/scherbakovandrew/Documents/test_data_fci.xlsx')
 df = pd.DataFrame(data)
-df = pd.DataFrame({
-    'Date': df['Date'], 
-    'GPR': df['GPR'], 
-    'Brent': df['Brent'], 
-    'GDP_(%)_m/m_real_2021': df['GDP_(%)_m/m_real_2021'], 
-    'unempl': df['unempl'], 
-    'consumption_real_2021': df['consumption_real_2021'], 
-    'net_exp': df['net_exp'],
-    'gov_expan': df['gov_expan'], 
-    'credits': df['credits'],
-    'Inflation_m/m_without_seas': df['Inflation_m/m_without_seas'],
-    'nom_eff_exch_rate_index_m/m': df['nom_eff_exch_rate_index_m/m'],
-    'real_eff_exchange_rate_index_m/m': df['real_eff_exchange_rate_index_m/m'],
-    'spread_diff': df['spread_diff'], 
-    'IMOEX': df['IMOEX'], 
-    'Interest_rate_(%)': df['Interest_rate_(%)'], 
-    'Fed_Bonds_10': df['Fed_Bonds_10'], 
-    'M2X': df['M2X'],
-    'exp_inf_firms_seas': df['exp_inf_firms_seas']
-})
+#df = pd.DataFrame({
+    #'Date': df['Date'], 
+    #'GPR': df['GPR'], 
+    #'Brent': df['Brent'], 
+    #'GDP_(%)_m/m_real_2021': df['GDP_(%)_m/m_real_2021'], 
+    #'unempl': df['unempl'], 
+    #'consumption_real_2021': df['consumption_real_2021'], 
+    #'net_exp': df['net_exp'],
+    #'gov_expan': df['gov_expan'], 
+    #'credits': df['credits'],
+    #'Inflation_m/m_without_seas': df['Inflation_m/m_without_seas'],
+    #'nom_eff_exch_rate_index_m/m': df['nom_eff_exch_rate_index_m/m'],
+    #'real_eff_exchange_rate_index_m/m': df['real_eff_exchange_rate_index_m/m'],
+    #'spread_diff': df['spread_diff'], 
+    #'IMOEX': df['IMOEX'], 
+    #'Interest_rate_(%)': df['Interest_rate_(%)'], 
+    #'Fed_Bonds_10': df['Fed_Bonds_10'], 
+    #'M2X': df['M2X'],
+    #'exp_inf_firms_seas': df['exp_inf_firms_seas']
+#})
+
+df = pd.DataFrame({'Date': df['Date'], 'GPR': df['GPR'], 'Brent': df['Brent'], 'GDP_(%)_m/m_real_2021': df['GDP_(%)_m/m_real_2021'], 
+                   'unempl': df['unempl'], 'net_exp': df['net_exp'], 'Inflation_m/m_without_seas': df['Inflation_m/m_without_seas'], 
+                   'gov_expan': df['gov_expan'], 'M2X': df['M2X'],
+                   'Interest_rate_(%)': df['Interest_rate_(%)'], 'Fed_Bonds_10': df['Fed_Bonds_10'], 
+                   'nom_eff_exch_rate_index_m/m': df['nom_eff_exch_rate_index_m/m'],
+                   'real_eff_exchange_rate_index_m/m': df['real_eff_exchange_rate_index_m/m'],
+                   'credits': df['credits'], 'consumption_real_2021': df['consumption_real_2021'], 
+                   'spread_diff': df['spread_diff'], 'IMOEX': df['IMOEX'],
+                   'exp_inf_firms_seas': df['exp_inf_firms_seas']})
+
 
 # Преобразование переменных в темпы роста (логарифмические приросты)
 # Это необходимо для стационарности и интерпретируемости VAR
