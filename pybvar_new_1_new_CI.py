@@ -251,7 +251,7 @@ def var_dummyobsprior(y: np.ndarray,
         beta=beta,
         sigma=sigma,
         beta_draws=beta_draws,
-        sigma_draws=sigma_draws,
+        sigma_draws=sigma_draws
     )
 
 
@@ -676,14 +676,35 @@ def print_cumulative_irf_table(cumulative_irf, var_names, target_indices=[2, 6],
 
 data = pd.read_excel('/Users/scherbakovandrew/Documents/Model_gretl.xlsx')
 df = pd.DataFrame(data)
-df = pd.DataFrame({'Date': df['Date'], 'GPR': df['GPR'], 'Brent': df['Brent'], 'GDP_(%)_m/m_real_2021': df['GDP_(%)_m/m_real_2021'], 
-                   'unempl': df['unempl'],
-                   'net_exp': df['net_exp'], 'Inflation_m/m_without_seas': df['Inflation_m/m_without_seas'], 
-                   'bud_balance': df['bud_balance'], 'gov_expan': df['gov_expan'], 'M2X': df['M2X'],
-                   'Interest_rate_(%)': df['Interest_rate_(%)'], 'Fed_Bonds_10': df['Fed_Bonds_10'], 'nom_eff_exch_rate_index_m/m': df['nom_eff_exch_rate_index_m/m'],
-                   'real_eff_exchange_rate_index_m/m': df['real_eff_exchange_rate_index_m/m'],
-                   'spread_diff': df['spread_diff'], 'IMOEX': df['IMOEX'],
-                   'exp_inf_firms_seas': df['exp_inf_firms_seas']})
+#df = pd.DataFrame({'Date': df['Date'], 'GPR': df['GPR'], 'Brent': df['Brent'], 'GDP_(%)_m/m_real_2021': df['GDP_(%)_m/m_real_2021'], 
+                   #'unempl': df['unempl'], 'net_exp': df['net_exp'], 'Inflation_m/m_without_seas': df['Inflation_m/m_without_seas'], 
+                   #'bud_balance': df['bud_balance'], 'gov_expan': df['gov_expan'], 'M2X': df['M2X'],
+                   #'Interest_rate_(%)': df['Interest_rate_(%)'], 'Fed_Bonds_10': df['Fed_Bonds_10'], 
+                   #'nom_eff_exch_rate_index_m/m': df['nom_eff_exch_rate_index_m/m'],
+                   #'real_eff_exchange_rate_index_m/m': df['real_eff_exchange_rate_index_m/m'],
+                   #'spread_diff': df['spread_diff'], 'IMOEX': df['IMOEX'],
+                   #'exp_inf_firms_seas': df['exp_inf_firms_seas']})
+
+df = pd.DataFrame({
+    'Date': df['Date'], 
+    'GPR': df['GPR'], 
+    'Brent': df['Brent'], 
+    'GDP_(%)_m/m_real_2021': df['GDP_(%)_m/m_real_2021'], 
+    'unempl': df['unempl'], 
+    'net_exp': df['net_exp'],
+    'bud_balance': df['bud_balance'],
+    'gov_expan': df['gov_expan'], 
+    'nom_eff_exch_rate_index_m/m': df['nom_eff_exch_rate_index_m/m'],
+    #'real_eff_exchange_rate_index_m/m': df['real_eff_exchange_rate_index_m/m'],
+    'Inflation_m/m_without_seas': df['Inflation_m/m_without_seas'],
+    'spread_diff': df['spread_diff'], 
+    'IMOEX': df['IMOEX'], 
+    'Interest_rate_(%)': df['Interest_rate_(%)'], 
+    'Fed_Bonds_10': df['Fed_Bonds_10'], 
+    'M2X': df['M2X'],
+    'exp_inf_firms_seas': df['exp_inf_firms_seas']
+})
+
 for col in ['GDP_(%)_m/m_real_2021']:
     #df[col] = df[col] - seasonal_decompose(df[col], model='additive', period=12).seasonal
     for i in range(0, len(df[col])):
@@ -706,10 +727,10 @@ for col in ['IMOEX', 'GPR']:
     ##for i in range(1, len(df[col])):
         ##df[col][i] = a[i]/a[i-1] 
 
-for col in ['Interest_rate_(%)', 'exp_inf_firms_seas']:
+for col in ['Interest_rate_(%)', 'exp_inf_firms_seas', 'Fed_Bonds_10']:
     a = list(df[col])
     for i in range(1, len(df[col])):
-        df[col][i] = (a[i]/100)/(a[i-1]/100) - 1
+        df[col][i] = (a[i]/100) - (a[i-1]/100)
         
 #for col in ['consumption_real_2021']:
     ##df[col] = df[col] - seasonal_decompose(df[col], model='additive', period=12).seasonal
@@ -725,7 +746,7 @@ for col in ['Brent', 'M2X']:
         df[col][i] = a[i]/a[i-1] - 1
         #df[col][i] = np.log(df[col][i])
         
-for col in ['Fed_Bonds_10', 'net_exp']:
+for col in ['net_exp']:
     #df[col] = df[col] - seasonal_decompose(df[col], model='multiplicative', period=12).seasonal
     a = list(df[col])
     for i in range(1, len(df[col])):
@@ -740,8 +761,8 @@ for col in ['Fed_Bonds_10', 'net_exp']:
         ##df[col][i] = a[i]/a[i-1]
 for col in ['Inflation_m/m_without_seas']:
     a = list(df[col])
-    for i in range(0, len(df[col])):
-        df[col][i] = df[col][i]/100
+    for i in range(1, len(df[col])):
+        df[col][i] = a[i]/100 - a[i-1]/100
 
 df = df.drop(index=0)
 ##df = df.drop(index = range(8))
@@ -762,9 +783,33 @@ def adf_test(series, title=''):
         print('\t%s: %.3f' % (key, value))
     print()
 
-for col in ['GDP_(%)_m/m_real_2021', 'Interest_rate_(%)', 'Inflation_m/m_without_seas', 'Fed_Bonds_10', 'real_eff_exchange_rate_index_m/m', 'Brent', 'IMOEX',
+for col in ['GDP_(%)_m/m_real_2021', 'Interest_rate_(%)', 'Inflation_m/m_without_seas', 'Fed_Bonds_10', #'real_eff_exchange_rate_index_m/m', 
+            'Brent', 'IMOEX',
             'M2X', 'exp_inf_firms_seas', 'spread_diff', 'bud_balance', 'gov_expan', 'unempl', 'net_exp', 'nom_eff_exch_rate_index_m/m', 'GPR']:
     adf_test(df[col], title=col)
+    
+
+columns_to_standardize = [
+    'GPR',
+    'Brent',
+    'GDP_(%)_m/m_real_2021',
+    'unempl',
+    'net_exp',
+    'Inflation_m/m_without_seas',
+    'bud_balance',           # Убедитесь, что этот столбец существует!
+    'gov_expan',
+    'M2X',
+    'Interest_rate_(%)',
+    'Fed_Bonds_10',
+    'nom_eff_exch_rate_index_m/m',
+    #'real_eff_exchange_rate_index_m/m',
+    'spread_diff',
+    'IMOEX',
+    'exp_inf_firms_seas'
+]
+
+scaler = StandardScaler()
+df[columns_to_standardize] = scaler.fit_transform(df[columns_to_standardize])
 
 df['Date'] = pd.to_datetime(df['Date'])
 
@@ -786,9 +831,9 @@ print(f"Переменные: {var_names}")
 
 # Настройка модели BVAR
 info = {
-    'lags': 8,  # Количество лагов
+    'lags': 12,  # Количество лагов
     'minnesota': {
-        'tightness': 0.7,      # Степень сжатия Minnesota prior
+        'tightness': 1,      # Степень сжатия Minnesota prior
         'sigma_deg': len(var_names) + 5,  # Степени свободы для приора на сигма
         'decay': 0.7, # Скорость убывания весов лагов
         'sigma_arlags': 1,  # GPR         Brent     GDP   consumption   unemp     exp    inflation    budget     expances     M2X     int rate    bonds   nom_exch  real_exch   spread      IMOEX     exp_inf         
@@ -820,7 +865,7 @@ shock_table = print_shock_sizes(
 
 # Вычисление импульсных откликов
 print("\nВычисление импульсных откликов...")    
-irf_results = compute_impulse_responses(var_result, n_periods=8, shock_size= 1.0)
+irf_results = compute_impulse_responses(var_result, n_periods=12, shock_size= 1.0)
 cumulative_irf = compute_cumulative_irf(irf_results)
 
 if 'draws' in irf_results and irf_results['draws'] is not None:
@@ -831,17 +876,17 @@ else:
 
 # Построение графиков импульсных откликов ВВП
 print("\nПостроение графиков импульсных откликов ВВП с доверительными интервалами...")
-plot_gdp_impulse_responses(irf_results, var_names, var_idx=2, n_periods=8)
-plot_gdp_impulse_responses(irf_results, var_names, var_idx=5, n_periods=8)
-plot_cumulative_impulse_responses(cumulative_irf, var_names, var_idx=2, n_periods=8)
-plot_cumulative_impulse_responses(cumulative_irf, var_names, var_idx=5, n_periods=8)
+plot_gdp_impulse_responses(irf_results, var_names, var_idx=2, n_periods=12)
+plot_gdp_impulse_responses(irf_results, var_names, var_idx=8, n_periods=12)
+plot_cumulative_impulse_responses(cumulative_irf, var_names, var_idx=2, n_periods=12)
+plot_cumulative_impulse_responses(cumulative_irf, var_names, var_idx=8, n_periods=12)
 #plot_gdp_impulse_responses(irf_results, var_names, var_idx=9, n_periods=6)
 
 
 # Вывод некоторых числовых результатов
 
 has_ci = irf_results['lower'] is not None and irf_results['upper'] is not None
-print_cumulative_irf_table(cumulative_irf, var_names, target_indices=[2, 5], n_periods=8)
+print_cumulative_irf_table(cumulative_irf, var_names, target_indices=[2, 8], n_periods=12)
 #for i, var_name in enumerate(var_names):
     #if i == 0:  # Пропускаем сам ВВП
         #continue
@@ -855,5 +900,4 @@ print_cumulative_irf_table(cumulative_irf, var_names, target_indices=[2, 5], n_p
         #else:
             #print(f"  Период {t+1}: {median_val:.6f}")
             
-
 
