@@ -1,0 +1,512 @@
+pacman::p_load(readxl, dplyr, tidyr, vars, urca, ggplot2, 
+               gridExtra, tseries, MASS, Matrix)
+
+data <- read_excel("~/Documents/Model_gretl.xlsx")
+
+df <- data %>%
+  dplyr::select(Date, GPR, Brent, `GDP_(%)_m/m_real_2021`, unempl,
+                gov_expan, 
+                `nom_eff_exch_rate_index_m/m`, `real_eff_exchange_rate_index_m/m`,
+                `Inflation_m/m_without_seas`, spread_diff, IMOEX, 
+                `Interest_rate_(%)`, Fed_Bonds_10, M2X, exp_inf_firms_seas)
+
+gdp_col <- df$`GDP_(%)_m/m_real_2021`
+for (i in 2:length(gdp_col)) {
+  df$`GDP_(%)_m/m_real_2021`[i] <- gdp_col[i]/100 -1
+}
+
+inf_col <- "Inflation_m/m_without_seas"
+vals <- df[[inf_col]]
+for (i in 2:length(vals)) {
+  df[[inf_col]][i] <- vals[i] / 100 
+}
+
+for (col in c("IMOEX")) {
+  vals <- df[[col]]
+  for (i in 2:length(vals)) {
+    df[[col]][i] <- log(vals[i]) - log(vals[i-1])
+  }
+}
+
+for (col in c("nom_eff_exch_rate_index_m/m")) {
+  vals <- df[[col]]
+  for (i in 2:length(vals)) {
+    df[[col]][i] <- vals[i]/100 
+  }
+}
+
+for (col in c("Interest_rate_(%)", "Fed_Bonds_10", "GPR", 'exp_inf_firms_seas')) {
+  vals <- df[[col]]
+  for (i in 2:length(vals)) {
+    df[[col]][i] <- (vals[i]/100) - (vals[i-1]/100)
+  }
+}
+
+for (col in c("Brent", "M2X")) {
+  vals <- df[[col]]
+  for (i in 2:length(vals)) {
+    df[[col]][i] <- log(vals[i]) - log(vals[i-1])
+  }
+}
+
+df <- df[-1, ]
+df <- df %>% mutate(across(-Date, as.numeric))
+
+
+for (col in names(df)[-1]) {
+  adf_result <- adf.test(na.omit(df[[col]]), alternative = "stationary")
+  cat(sprintf("\n%s:\n", col))
+  cat(sprintf("  ADF Statistic: %.4f\n", adf_result$statistic))
+  cat(sprintf("  p-value: %.4f\n", adf_result$p.value))
+}
+
+
+# Create matrix without date column
+y_data <- as.matrix(df[, -1])
+var_names <- names(df)[-1]
+
+# Normalized names for plotting
+var_norm_names <- c(
+  "GPR" = "Geopolitics",
+  "Brent" = "Oil",
+  "GDP_(%)_m/m_real_2021" = "GDP",
+  "unempl" = "Unemployment",
+  
+  "gov_expan" = "Expenses",
+  "nom_eff_exch_rate_index_m/m" = "Nom Exch Rate",
+  'real_eff_exchange_rate_index_m/m' = 'Real Exch Rate',
+  "Inflation_m/m_without_seas" = "Inflation",
+  "spread_diff" = "Spread",
+  "IMOEX" = "IMOEX",
+  "Interest_rate_(%)" = "Int Rate",
+  "Fed_Bonds_10" = "Bonds 10",
+  "M2X" = "M2X",
+  "exp_inf_firms_seas" = "Exp inf firm"
+)
+
+
+
+# Function to create VAR lags
+create_var_lags <- function(y, p) {
+  T <- nrow(y)
+  N <- ncol(y)
+  Y <- y[(p+1):T, , drop=FALSE]
+  X <- matrix(0, T-p, N*p)
+  
+  for (i in 1:p) {
+    X[, ((i-1)*N + 1):(i*N)] <- y[(p+1-i):(T-i), ]
+  }
+  
+  # Add constant
+  X <- cbind(X, 1)
+  
+  return(list(Y = Y, X = X))
+}
+
+# Minnesota prior setup
+setup_minnesota_prior <- function(y, p, lambda = 1.5, alpha = 2, var_scale = 1) {
+  N <- ncol(y)
+  K <- N * p + 1  # Including constant
+  
+  # Оценка AR(1) для каждой переменной и извлечение phi
+  phi_ar1 <- numeric(N)
+  sigma <- numeric(N)
+  
+  for (i in 1:N) {
+    # Удаляем NA при необходимости
+    y_i <- na.omit(y[, i])
+    
+    if (length(y_i) <= 2) {
+      # Резервное значение, если данных мало
+      phi_ar1[i] <- 0.9
+      sigma[i] <- sd(y_i, na.rm = TRUE)
+    } else {
+      # Оцениваем AR(1) вручную (OLS): y_t ~ y_{t-1}
+      y_lag <- y_i[-length(y_i)]
+      y_lead <- y_i[-1]
+      
+      # Добавляем константу
+      X_ar <- cbind(1, y_lag)
+      beta_ar <- solve(t(X_ar) %*% X_ar) %*% t(X_ar) %*% y_lead
+      
+      phi_ar1[i] <- beta_ar[2]  # коэффициент при лаге
+      # Остатки и оценка сигмы
+      resid_ar <- y_lead - X_ar %*% beta_ar
+      sigma[i] <- sqrt(sum(resid_ar^2) / (length(resid_ar) - 2))
+    }
+  }
+  
+  # Prior mean
+  B_prior <- matrix(0, K, N)
+  for (i in 1:N) {
+    B_prior[i, i] <- phi_ar1[i]  # Первый собственный лаг = phi из AR(1)
+  }
+  
+  # Prior variance (остаётся без изменений)
+  V_prior <- matrix(0, K, K)
+  
+  for (i in 1:N) {
+    for (j in 1:N) {
+      for (l in 1:p) {
+        idx <- (l - 1) * N + j
+        if (i == j) {
+          V_prior[idx, idx] <- (lambda^2) / (l^(2 * alpha))
+        } else {
+          V_prior[idx, idx] <- (lambda^2) * (sigma[i]^2) / ((l^(2 * alpha)) * (sigma[j]^2))
+        }
+      }
+    }
+  }
+  
+  # Loose prior on constant
+  V_prior[K, K] <- 100
+  
+  # Prior for Sigma (inverse Wishart)
+  S_prior <- diag(sigma^2) * var_scale
+  nu_prior <- N + 2
+  
+  return(list(
+    B_prior = B_prior,
+    V_prior = V_prior,
+    S_prior = S_prior,
+    nu_prior = nu_prior,
+    sigma = sigma,
+    phi_ar1 = phi_ar1  # Опционально: для диагностики
+  ))
+}
+
+# Gibbs sampler for BVAR
+gibbs_bvar <- function(Y, X, prior, n_draws = 5000, n_burn = 1000) {
+  N <- ncol(Y)
+  K <- ncol(X)
+  T <- nrow(Y)
+  
+  # Storage
+  B_draws <- array(0, dim = c(K, N, n_draws))
+  Sigma_draws <- array(0, dim = c(N, N, n_draws))
+  
+  # Initial values
+  B <- solve(t(X) %*% X + diag(0.01, K)) %*% t(X) %*% Y
+  Sigma <- diag(diag(cov(Y - X %*% B)))
+  
+  # Precompute prior precision
+  V_prior_inv <- solve(prior$V_prior + diag(1e-6, K))
+  
+  cat("Running Gibbs sampler...\n")
+  pb <- txtProgressBar(min = 0, max = n_draws + n_burn, style = 3)
+  
+  for (iter in 1:(n_draws + n_burn)) {
+    # Step 1: Draw B | Sigma (equation by equation)
+    for (j in 1:N) {
+      # Posterior variance
+      V_post <- solve(V_prior_inv + (1/Sigma[j,j]) * t(X) %*% X)
+      
+      # Posterior mean
+      B_post <- V_post %*% (V_prior_inv %*% prior$B_prior[,j] + 
+                              (1/Sigma[j,j]) * t(X) %*% Y[,j])
+      
+      # Draw
+      B[,j] <- B_post + t(chol(V_post)) %*% rnorm(K)
+    }
+    
+    # Step 2: Draw Sigma | B
+    resid <- Y - X %*% B
+    S_post <- prior$S_prior + t(resid) %*% resid
+    nu_post <- prior$nu_prior + T
+    
+    # Draw from inverse Wishart
+    Sigma <- solve(rWishart(1, nu_post, solve(S_post))[,,1])
+    
+    # Store draws after burn-in
+    if (iter > n_burn) {
+      draw_idx <- iter - n_burn
+      B_draws[,,draw_idx] <- B
+      Sigma_draws[,,draw_idx] <- Sigma
+    }
+    
+    setTxtProgressBar(pb, iter)
+  }
+  close(pb)
+  
+  return(list(B_draws = B_draws, Sigma_draws = Sigma_draws))
+}
+
+
+n_lags <- 4
+lambda <- 0.2
+alpha <- 2
+
+cat(sprintf("Lags: %d\n", n_lags))
+cat(sprintf("Lambda (tightness): %.2f\n", lambda))
+cat(sprintf("Alpha (decay): %.2f\n", alpha))
+
+# Prepare data
+var_data <- create_var_lags(y_data, n_lags)
+Y <- var_data$Y
+X <- var_data$X
+
+# Setup prior
+prior <- setup_minnesota_prior(y_data, n_lags, lambda, alpha)
+
+# Run Gibbs sampler
+n_draws <- 5000
+n_burn <- 1000
+
+bvar_results <- gibbs_bvar(Y, X, prior, n_draws, n_burn)
+
+cat("\nBVAR estimation completed!\n")
+cat(sprintf("Total draws: %d (burn-in: %d)\n", n_draws, n_burn))
+
+# Posterior means
+B_mean <- apply(bvar_results$B_draws, c(1,2), mean)
+Sigma_mean <- apply(bvar_results$Sigma_draws, c(1,2), mean)
+
+compute_irf_bvar <- function(B_draws, Sigma_draws, n_periods = 18, conf_level = 0.90) {
+  K <- dim(B_draws)[1]
+  N <- dim(B_draws)[2]
+  n_draws <- dim(B_draws)[3]
+  p <- (K - 1) / N  # Subtract constant
+  
+  irf_draws <- array(0, dim = c(N, N, n_periods, n_draws))
+  
+  cat("\nComputing impulse responses...\n")
+  pb <- txtProgressBar(min = 0, max = n_draws, style = 3)
+  
+  for (d in 1:n_draws) {
+    B <- B_draws[,,d]
+    Sigma <- Sigma_draws[,,d]
+    
+    # Cholesky decomposition
+    P <- t(chol(Sigma))
+    
+    # Companion form
+    A <- B[1:(N*p), ]
+    if (p > 1) {
+      comp <- rbind(t(A), cbind(diag(N*(p-1)), matrix(0, N*(p-1), N)))
+    } else {
+      comp <- t(A)
+    }
+    
+    # Compute IRFs
+    power_comp <- diag(nrow(comp))
+    for (h in 1:n_periods) {
+      if (h > 1) power_comp <- power_comp %*% comp
+      irf_draws[,,h,d] <- power_comp[1:N, 1:N] %*% P
+    }
+    
+    setTxtProgressBar(pb, d)
+  }
+  close(pb)
+  
+  # Compute statistics
+  irf_mean <- apply(irf_draws, c(1,2,3), mean)
+  irf_lower <- apply(irf_draws, c(1,2,3), quantile, probs = (1-conf_level)/2)
+  irf_upper <- apply(irf_draws, c(1,2,3), quantile, probs = 1-(1-conf_level)/2)
+  
+  return(list(
+    mean = irf_mean,
+    lower = irf_lower,
+    upper = irf_upper,
+    draws = irf_draws
+  ))
+}
+
+n_periods <- 12
+irf_results <- compute_irf_bvar(bvar_results$B_draws, bvar_results$Sigma_draws, 
+                                n_periods, conf_level = 0.80)
+
+
+plot_var_irf <- function(irf_results, var_names, var_norm_names, 
+                         target_var_idx, n_periods = 12) {
+  n_vars <- length(var_names)
+  target_name <- var_norm_names[var_names[target_var_idx]]
+  
+  plot_list <- list()
+  plot_idx <- 1
+  
+  for (shock_idx in 1:n_vars) {
+    if (shock_idx == target_var_idx) next
+    
+    shock_name <- var_norm_names[var_names[shock_idx]]
+    
+    periods <- 0:(n_periods-1)
+    irf_mean <- irf_results$mean[target_var_idx, shock_idx, ]
+    irf_lower <- irf_results$lower[target_var_idx, shock_idx, ]
+    irf_upper <- irf_results$upper[target_var_idx, shock_idx, ]
+    
+    plot_data <- data.frame(
+      period = periods,
+      mean = irf_mean,
+      lower = irf_lower,
+      upper = irf_upper
+    )
+    
+    p <- ggplot(plot_data, aes(x = period)) +
+      geom_line(aes(y = mean), color = "blue", linewidth = 1) +
+      geom_ribbon(aes(ymin = lower, ymax = upper), 
+                  alpha = 0.3, fill = "lightblue") +
+      geom_hline(yintercept = 0, linetype = "solid", 
+                 color = "black", alpha = 0.4, linewidth = 0.5) +
+      labs(
+        title = paste(target_name, "response to", shock_name, "shock"),
+        x = "Periods",
+        y = "Response"
+      ) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(face = "bold", size = 10),
+        axis.title = element_text(size = 9),
+        panel.grid.minor = element_blank()
+      )
+    
+    plot_list[[plot_idx]] <- p
+    plot_idx <- plot_idx + 1
+  }
+  
+  n_plots <- length(plot_list)
+  n_cols <- 4
+  n_rows <- ceiling(n_plots / n_cols)
+  
+  do.call(gridExtra::grid.arrange, c(plot_list, ncol = n_cols, nrow = n_rows,
+                                     top = paste("IRFs:", target_name, "Response")))
+}
+
+
+
+gdp_idx <- which(var_names == "GDP_(%)_m/m_real_2021")
+inf_idx <- which(var_names == "Inflation_m/m_without_seas")
+
+cat("\n=== Plotting IRFs for GDP ===\n")
+plot_var_irf(irf_results, var_names, var_norm_names, gdp_idx, n_periods)
+
+cat("\n=== Plotting IRFs for Inflation ===\n")
+plot_var_irf(irf_results, var_names, var_norm_names, inf_idx, n_periods)
+
+# Rolling 3-month-ahead GDP forecast evaluation
+
+library(zoo) 
+
+original_dates <- as.yearmon(data$Date)
+forecast_dates <- original_dates[-1]  # даты для df
+
+if (length(forecast_dates) != nrow(y_data)) {
+  stop("Mismatch between dates and y_data")
+}
+
+start_date <- as.yearmon("2024-07")
+start_idx <- which(forecast_dates >= start_date)[1]
+
+# Индекс ВВП в данных
+gdp_col_idx <- which(var_names == "GDP_(%)_m/m_real_2021")
+if (length(gdp_col_idx) == 0) stop("GDP variable not found!")
+
+# Параметры
+forecast_horizon <- 1
+min_obs_for_estimation <- n_lags + 20  # минимум для надёжной оценки BVAR
+
+errors <- c()
+forecast_table <- data.frame(
+  date = as.Date(character()),
+  actual = numeric(),
+  forecast = numeric(),
+  stringsAsFactors = FALSE
+)
+
+cat("\n=== Rolling 3-step GDP forecast evaluation ===\n")
+cat("Start date:", forecast_dates[start_idx], "\n")
+cat("Total observations available:", nrow(y_data), "\n")
+
+for (t in start_idx:(nrow(y_data) - forecast_horizon)) {
+  # Обучающая выборка: всё до момента t 
+  train_end <- t
+  if (train_end < min_obs_for_estimation) next
+  
+  train_y <- y_data[1:train_end, , drop = FALSE]
+  
+  # Оцениваем BVAR на обучающей выборке
+  var_data_train <- create_var_lags(train_y, n_lags)
+  Y_train <- var_data_train$Y
+  X_train <- var_data_train$X
+  
+  # Prior на обучающей выборке
+  prior_train <- setup_minnesota_prior(train_y, n_lags, lambda, alpha)
+  
+  # Gibbs
+  bvar_train <- gibbs_bvar(Y_train, X_train, prior_train, 
+                           n_draws = 2000, n_burn = 500)
+  
+  # Прогноз: используем среднее по постериорным предсказаниям
+  n_draws_forecast <- dim(bvar_train$B_draws)[3]
+  forecasts_draws <- matrix(0, nrow = forecast_horizon, ncol = n_draws_forecast)
+  
+  for (d in 1:n_draws_forecast) {
+    B_draw <- bvar_train$B_draws[,,d]
+    y_lagged <- rev(train_y[train_end:(train_end - n_lags + 1), , drop = FALSE])
+    y_state <- as.vector(t(y_lagged))  # вектор длины N * p
+    
+    # Добавляем константу
+    state_with_const <- c(y_state, 1)
+    
+    # Прогнозируем шаг за шагом
+    y_forecast <- numeric(forecast_horizon)
+    current_state <- y_state
+    
+    for (h in 1:forecast_horizon) {
+      # X для прогноза: текущее состояние + константа
+      X_forecast <- c(current_state, 1)
+      y_next <- X_forecast %*% B_draw 
+      y_forecast[h] <- y_next[gdp_col_idx]
+      
+      if (n_lags > 1) {
+        current_state <- c(y_next, current_state[1:(length(current_state)-ncol(train_y))])
+      } else {
+        current_state <- y_next
+      }
+    }
+    
+    forecasts_draws[, d] <- y_forecast
+  }
+  
+  # Средний прогноз по постериорным сэмплам
+  gdp_forecast_mean <- apply(forecasts_draws, 1, mean)
+  
+  # Фактические значения
+  actual_values <- y_data[(t + 1):(t + forecast_horizon), gdp_col_idx]
+  
+  # Если есть NA — пропускаем
+  if (any(is.na(actual_values)) || any(is.na(gdp_forecast_mean))) {
+    next
+  }
+  
+  # Ошибка 
+  errors <- c(errors, actual_values - gdp_forecast_mean)
+  
+  # Добавляем в таблицу (по каждому месяцу)
+  step_dates <- forecast_dates[(t + 1):(t + forecast_horizon)]
+  forecast_table <- rbind(forecast_table, data.frame(
+    date = as.Date(as.yearmon(step_dates)),  # конвертируем в Date для таблицы
+    actual = actual_values,
+    forecast = gdp_forecast_mean
+  ))
+  
+  cat(sprintf("Step %d/%d: trained on %d obs, forecasted %s to %s\n",
+              t - start_idx + 1,
+              nrow(y_data) - forecast_horizon - start_idx + 1,
+              train_end,
+              format(forecast_dates[t+1], "%Y-%m"),
+              format(forecast_dates[t+forecast_horizon], "%Y-%m")))
+}
+
+# Итоговая RMSE
+rmse_gdp <- sqrt(mean(errors^2, na.rm = TRUE))
+cat("\n=== Final Results ===\n")
+cat(sprintf("Average RMSE of 3-month-ahead GDP forecast: %.6f\n", rmse_gdp))
+
+
+# Вывод таблицы
+cat("\n=== Forecast vs Actual (GDP) ===\n")
+print(head(forecast_table, 20))  # первые 20 строк
+cat("\n... (total", nrow(forecast_table), "forecasts)\n")
+
+
+
